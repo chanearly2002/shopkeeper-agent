@@ -9,7 +9,7 @@
 - 后端：Python 3.14 + FastAPI + LangGraph + LangChain + SQLAlchemy(async)，依赖用 `uv` 管理
 - 前端：React 19 + Vite + Tailwind CSS 3 + TypeScript，依赖用 `pnpm` 管理（位于 `frontend/`）
 - 基础设施（`docker/docker-compose.yaml`）：MySQL 8（`meta` 元数据库 + `dw` 教学数仓）、Qdrant、Elasticsearch 8.19 + IK 分词、Kibana、TEI Embedding（`bge-large-zh-v1.5`，1024 维）
-- 本仓库 fork 自教程项目 `didilili/shopkeeper-agent`，这里只有 `main`，README 中提到的章节分支（`03-env-services` 等）在上游仓库
+- 本仓库基于 `didilili/shopkeeper-agent` 二次开发，只有 `main` 分支；上游的教程章节分支不在这里
 - 只有少量单元测试（`tests/`），没有 CI 和评测集；代码注释、日志、Prompt、前端文案全部是中文
 - 后续改进方向（评测体系、多轮问数）的设计方案见 `docs/design/eval-and-multiturn.md`
 
@@ -174,7 +174,7 @@ extract_keywords ─┬─ recall_column ─┐
 - `filter_table` / `filter_metric` / `recall_*` 用 `JsonOutputParser`，模型输出格式不对会直接抛异常中断整条流程，没有重试或降级
 - 请求级 `AsyncSession` 不支持并发使用。目前并行的 `recall_*` 节点不碰 MySQL 所以没问题；新增会访问 MySQL 的并行节点时要注意
 - 整体是单轮无状态：图没有 checkpointer，接口不带会话 id，前端的消息列表只存在内存里（改进方案见 `docs/design/eval-and-multiturn.md`）
-- README 的“能力边界”一节列出了上游有意不做的方向（权限、多租户、SQL 审计、缓存限流、评测、多轮对话等）
+- 权限控制、多租户、查询缓存、限流、监控告警等生产化能力尚未涉及（README“当前限制与规划”一节）
 
 ## 本地完整联调的注意事项
 
