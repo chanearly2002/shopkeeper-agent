@@ -21,3 +21,5 @@ class ColumnInfo:
     description: str
     alias: list[str]
     table_id: str
+    # 外键关联的目标字段 表名.字段名，非外键为 None
+    ref: str | None = None

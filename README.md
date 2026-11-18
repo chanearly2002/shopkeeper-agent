@@ -25,15 +25,16 @@ shopkeeper-agent 的做法是**先检索、再生成、最后校验执行**：
 1. **离线构建元数据知识库**：把数仓中的表、字段、指标及字段真实取值，分别写入 MySQL（结构化元数据）、Qdrant（语义向量）和 Elasticsearch（取值全文索引）。
 2. **在线问数**：用 LangGraph 编排多步流程——抽取关键词、三路并行召回、合并与过滤上下文、生成 SQL、只读校验与自动修正、执行查询。每一步的进度都通过 SSE 实时推送到前端。
 
-例如问“统计华北地区的销售总额”，系统会召回 `dim_region.region_name` 字段和取值“华北”、`fact_order.order_amount` 字段和 GMV 指标，补齐两表关联所需的主外键，生成并执行对应的 join 查询。
+例如问“2025 年美妆个护的支付金额”，系统会召回取值“美妆个护”所在的 `dim_category.category_l1` 字段，以及“支付金额”指标的口径（只统计 `pay_time` 不为空的订单）；发现订单表和类目表之间还隔着订单明细表和商品表，就自动补上这两张中间表，再按外键关系生成多表 join 查询。
 
 ## 核心特性
 
 - **混合检索**：字段和指标用 Qdrant 做语义召回，字段取值用 Elasticsearch + IK 分词做全文召回，三路并行；召回结果再从 MySQL 补齐指标依赖字段和主外键。
+- **关联路径补全**：元数据中为每个外键声明关联目标（`ref`），系统据此找出候选表之间缺失的中间表，并让模型按 `ref` 编写 JOIN 条件，避免经由维度表关联造成的金额重复计算。
 - **分步推理**：检索词扩展、表字段过滤、指标过滤、SQL 生成各由独立节点完成。大模型只负责“选择”，上下文结构的裁剪由程序完成。
 - **SQL 安全**：执行前用 sqlglot 做程序侧只读校验，只允许单条查询语句，拒绝写入、DDL、加锁和导出；查询有行数上限和执行超时。
 - **校验修正闭环**：先用 `EXPLAIN` 校验 SQL，失败时带着数据库报错交给大模型修正，再重新校验，修正次数有上限。
-- **指标口径统一**：GMV、AOV 等指标的计算公式写在元数据配置里，生成 SQL 时严格遵循。
+- **指标口径统一**：下单金额、支付金额、客单价、退款率等 13 个指标的计算公式写在元数据配置里，生成 SQL 时严格遵循。
 - **过程可观测**：前端实时展示流程图中每个节点的状态、重试次数和失败原因，以及最终执行的 SQL；后端日志按 request_id 串联。
 - **构建幂等**：元数据知识库可以重复构建，修改配置后重跑即可，不会产生重复数据。
 
@@ -57,7 +58,7 @@ extract_keywords ─┬─ recall_column ─┐
 | `extract_keywords` | jieba 抽取关键词，原始问题本身也作为检索词保留 |
 | `recall_column` / `recall_metric` | 大模型扩展检索词，向量化后在 Qdrant 中召回字段和指标 |
 | `recall_value` | 大模型扩展取值候选，在 Elasticsearch 中召回字段真实取值（如“华北”） |
-| `merge_retrieved_info` | 合并三路结果，补齐指标依赖字段和表的主外键，按表组织上下文 |
+| `merge_retrieved_info` | 合并三路结果，补齐指标依赖字段、关联路径上的中间表和各表主外键，按表组织上下文 |
 | `filter_table` / `filter_metric` | 大模型挑出回答问题真正需要的表、字段和指标 |
 | `add_extra_context` | 补充当前日期、季度和数据库版本 |
 | `generate_sql` / `correct_sql` | 生成 SQL；校验失败时根据报错做最小修正 |
@@ -96,7 +97,7 @@ shopkeeper-agent/
 │   ├── models/           # SQLAlchemy ORM 模型（元数据库）
 │   ├── prompt/           # Prompt 加载工具
 │   ├── repositories/     # MySQL、Qdrant、Elasticsearch 数据访问层
-│   ├── scripts/          # 元数据知识库构建脚本
+│   ├── scripts/          # 示例数据生成、元数据知识库构建脚本
 │   └── services/         # 知识库构建服务、问数查询服务
 ├── conf/                 # app_config.yaml（运行配置）、meta_config.yaml（元数据配置）
 ├── docker/               # Docker Compose、MySQL 初始化 SQL、ES IK 插件
@@ -153,9 +154,17 @@ docker compose -f docker/docker-compose.yaml up -d
 | Qdrant | 6333 |
 | Embedding (TEI) | 8081 |
 
-MySQL 容器首次启动时，会自动执行 `docker/mysql/meta.sql` 和 `docker/mysql/dw.sql`，初始化元数据库和示例数仓。
+MySQL 容器首次启动时，会自动执行 `docker/mysql/meta.sql` 和 `docker/mysql/dw.sql`，创建元数据库和数仓的表结构。
 
-### 5. 构建元数据知识库
+### 5. 生成示例数据
+
+```bash
+uv run python -m app.scripts.generate_dw_data
+```
+
+用固定随机种子生成两年的电商交易数据并写入数仓（约 6 万订单、20 万条行为，耗时十几秒）。每次运行都会重建数仓的表，得到完全相同的数据。想快速试用可以加 `--scale small`，订单和行为数据量为默认的十分之一。
+
+### 6. 构建元数据知识库
 
 ```bash
 uv run python -m app.scripts.build_meta_knowledge -c conf/meta_config.yaml
@@ -169,7 +178,7 @@ uv run python -m app.scripts.build_meta_knowledge -c conf/meta_config.yaml
 uv run python -m app.scripts.build_meta_knowledge -c conf/meta_config.yaml --reset
 ```
 
-### 6. 启动后端和前端
+### 7. 启动后端和前端
 
 ```bash
 uv run fastapi dev main.py
@@ -188,7 +197,7 @@ pnpm dev
 `POST /api/query`
 
 ```json
-{ "query": "统计 2025 年第一季度各大区的 GMV，并按 GMV 从高到低排序" }
+{ "query": "2025 年各大区的支付金额，按从高到低排序" }
 ```
 
 响应为 SSE 流，每条消息形如 `data: {json}`：
@@ -201,25 +210,45 @@ pnpm dev
 
 ## 示例数据
 
-`docker/mysql/dw.sql` 提供了一个星型模型的小型电商数仓，数据只覆盖 **2025-01-01 ～ 2025-03-31**：
+示例数仓参考淘宝用户行为数据集、京东 JData、Olist 等公开电商数据集的表结构设计，是一个 4 张事实表 + 7 张维度表的星型模型（类目为雪花结构），覆盖 **2024-01-01 ～ 2025-12-31** 两年。设计说明见 [docs/design/dw-schema-v2.md](docs/design/dw-schema-v2.md)。
 
-| 表 | 行数 | 说明 |
+| 表 | 粒度 | 行数 |
 | --- | --- | --- |
-| `fact_order` | 115 | 订单事实表，一行一个订单，包含购买数量和订单金额 |
-| `dim_date` | 90 | 日期维度（年、季度、月、日） |
-| `dim_customer` | 20 | 客户维度（姓名、性别、会员等级） |
-| `dim_product` | 15 | 商品维度（名称、品类、品牌） |
-| `dim_region` | 6 | 地区维度（省份、大区、国家） |
+| `fact_order` | 一笔订单：状态、下单与支付时间、优惠、运费、应付金额 | 约 5.9 万 |
+| `fact_order_item` | 订单中的一个 SKU：件数、成交单价、分摊优惠、实付金额、参与的活动 | 约 8.6 万 |
+| `fact_refund` | 一次退款申请：类型、原因、状态、退款金额 | 约 5.9 千 |
+| `fact_user_behavior` | 一次浏览 / 收藏 / 加购行为 | 约 19 万 |
+| `dim_date` | 一天，含季度、周、节假日 | 731 |
+| `dim_region` | 一个城市，含城市等级和大区 | 44 |
+| `dim_user` | 一个用户，含年龄段、会员等级、是否付费会员 | 3,000 |
+| `dim_category` | 一个三级类目 | 40 |
+| `dim_shop` | 一个店铺：自营 / 旗舰店 / 专卖店 / 专营店 | 49 |
+| `dim_sku` | 一个 SKU，含标价和成本价 | 317 |
+| `dim_activity` | 一个营销活动：618、双 11 等大促和日常活动 | 14 |
 
-`conf/meta_config.yaml` 中定义的指标：
+数据保留了真实业务中的口径差异，用来检验 Agent 生成的 SQL 在业务上是否正确：
 
-| 指标 | 含义 | 计算口径 |
-| --- | --- | --- |
-| GMV | 成交总额 | `SUM(order_amount)` |
-| AOV | 平均订单金额 | `SUM(order_amount) / COUNT(DISTINCT order_id)` |
-| ASP | 件单价 | `SUM(order_amount) / SUM(order_quantity)` |
+- 订单有已取消、待支付状态，**下单金额 ≠ 支付金额**；
+- 订单头和订单明细各有一份金额，两表关联后对订单金额求和会被放大约 60%；
+- 退款单独成表，只有“退款成功”才应扣减；
+- 同一张日期表被下单日期、支付日期等多个外键引用，同一张地区表被收货城市和用户常住城市引用；
+- 大促期间销量明显上升，各品类的价格带、毛利率和退款率不同。
 
-由于数据只有一个季度，`conf/app_config.yaml` 中的 `agent.today` 默认固定为 `2025-03-31`，这样“本月”“最近 7 天”这类相对时间的问题也能查到数据。接入真实数仓时，把它设为 `null`，就会使用真实的当前日期。
+`conf/meta_config.yaml` 中定义了 13 个指标，例如：
+
+| 指标 | 计算口径 |
+| --- | --- |
+| 下单金额（GMV） | `SUM(fact_order.order_amount)`，包含未支付和已取消订单 |
+| 支付金额（销售额） | `SUM(fact_order.order_amount)`，限 `pay_time IS NOT NULL` |
+| 净支付金额 | 支付金额 − 退款成功的 `refund_amount` |
+| 客单价 / 笔单价 | 支付金额 ÷ 支付买家数 / 支付订单数 |
+| 件单价 | 已支付明细 `SUM(pay_amount) ÷ SUM(quantity)` |
+| 毛利 | 已支付明细 `SUM(pay_amount − cost_price × quantity)` |
+| 退款率 | 退款成功金额 ÷ 支付金额 |
+| 浏览转化率 | 支付买家数 ÷ 浏览用户数 |
+| 复购率 | 支付订单数 ≥ 2 的买家数 ÷ 支付买家数 |
+
+`conf/app_config.yaml` 中的 `agent.today` 默认固定为数据的最后一天 `2025-12-31`，这样“本月”“去年同期”这类相对时间的问题也能查到数据。接入真实数仓时，把它设为 `null`，就会使用真实的当前日期。
 
 ## 主要配置
 
@@ -233,10 +262,10 @@ pnpm dev
 | `agent.max_correct_attempts` | 2 | SQL 校验失败后的最多修正次数 |
 | `agent.max_result_rows` | 1000 | 单次查询最多返回的行数 |
 | `agent.max_execution_ms` | 30000 | 单条查询最长执行时间（毫秒） |
-| `agent.today` | `2025-03-31` | 注入给模型的“今天”，`null` 表示使用真实日期 |
+| `agent.today` | `2025-12-31` | 注入给模型的“今天”，`null` 表示使用真实日期 |
 | `api.cors_origins` | `localhost:5173` | 允许跨域访问的前端地址 |
 
-要接入自己的数仓，需要修改 `conf/meta_config.yaml`：声明要纳入的表和字段（角色、描述、别名、是否同步取值）以及指标（描述、计算公式、依赖字段），然后重新构建知识库。
+要接入自己的数仓，需要修改 `conf/meta_config.yaml`：声明要纳入的表（描述中写明粒度）和字段（角色、描述、别名、是否同步取值，外键还要写明关联目标 `ref`），以及指标（描述、计算公式、依赖字段），然后重新构建知识库。构建前会自动检查 `ref` 和指标依赖的字段是否都存在。
 
 ## 开发
 

@@ -31,3 +31,8 @@ class ColumnInfoMySQL(Base):
     description: Mapped[str | None] = mapped_column(Text, comment="列描述")
     alias: Mapped[dict | list | None] = mapped_column(JSON, comment="列别名")
     table_id: Mapped[str | None] = mapped_column(String(64), comment="所属表编号")
+    # 外键字段关联的目标字段，例如 fact_order.pay_date_id -> dim_date.date_id
+    # 字段名和维度表主键不一致时，模型只能靠它写出正确的 JOIN 条件
+    ref: Mapped[str | None] = mapped_column(
+        "ref_column", String(128), comment="外键关联的目标字段"
+    )

@@ -20,10 +20,10 @@ import { cn, summarizeResult } from "./lib/format";
 import type { AgentEvent, ChatMessage, StepState } from "./types/agent";
 
 const examples = [
-  "统计 2025 年第一季度各大区的 GMV，并按 GMV 从高到低排序",
-  "统计 2025 年 3 月各商品品类的销量和销售额",
-  "查询华东地区 2025 年第一季度销售额最高的前 5 个商品",
-  "按会员等级统计 2025 年第一季度的订单数和销售额",
+  "2025 年各大区的支付金额，按从高到低排序",
+  "2025 年 618 大促期间各一级类目的支付金额和件单价",
+  "2025 年每个月的退款率是多少",
+  "对比 2024 年和 2025 年双 11 当天的支付买家数和客单价",
 ];
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "Vite /api proxy";

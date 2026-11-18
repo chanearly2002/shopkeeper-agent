@@ -25,7 +25,8 @@ CREATE TABLE column_info
     examples    JSON COMMENT '数据示例',
     description TEXT COMMENT '列描述',
     alias       JSON COMMENT '列别名',
-    table_id    VARCHAR(64) COMMENT '所属表编号'
+    table_id    VARCHAR(64) COMMENT '所属表编号',
+    ref_column  VARCHAR(128) COMMENT '外键关联的目标字段，格式 表名.字段名'
 );
 
 DROP TABLE IF EXISTS metric_info;

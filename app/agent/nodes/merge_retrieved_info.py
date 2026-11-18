@@ -2,13 +2,14 @@
 召回信息合并节点
 
 负责把字段 字段取值和指标三路召回结果聚合成统一上下文
-这一层会补齐指标依赖字段 字段真实取值 主外键字段和表信息
+这一层会补齐指标依赖字段 字段真实取值 关联路径上的中间表 主外键字段和表信息
 后续过滤节点不再关心信息来自哪个检索分支，只处理合并后的表上下文和指标上下文
 """
 
 from langgraph.runtime import Runtime
 
 from app.agent.context import DataAgentContext
+from app.agent.join_path import find_bridge_tables
 from app.agent.state import (
     ColumnInfoState,
     DataAgentState,
@@ -64,7 +65,7 @@ async def merge_retrieved_info(
                     retrieved_column_infos_map[relevant_column] = column_info
 
         # 3. 把字段取值合并回字段 examples
-        # 字段取值召回命中的是 column_id + value，例如 dim_region.region_name.华北。
+        # 字段取值召回命中的是 column_id + value，例如 dim_region.area.华北。
         # 把真实 value 放进字段 examples，可以帮助模型写出更接近真实数据的 where 条件。
         for retrieved_value_info in retrieved_value_infos:
             value = retrieved_value_info.value
@@ -87,7 +88,23 @@ async def merge_retrieved_info(
                 table_to_columns_map[table_id] = []
             table_to_columns_map[table_id].append(column_info)
 
-        # 5. 补齐主外键字段
+        # 5. 补齐关联路径上的中间表
+        # 候选表之间可能隔着没被召回的表，例如 fact_order 和 dim_category 之间
+        # 还需要 fact_order_item 和 dim_sku；按外键 ref 构成的关系图找出这些中间表。
+        # 事实表排在前面作为连通起点，路径优先沿外键多对一关联，避免经由维度表扇出。
+        table_roles = await meta_mysql_repository.get_table_roles()
+        fact_tables = {t for t, role in table_roles.items() if role == "fact"}
+        candidate_tables = sorted(
+            table_to_columns_map, key=lambda t: 0 if t in fact_tables else 1
+        )
+        foreign_keys = await meta_mysql_repository.get_foreign_key_columns()
+        edges = [(fk.table_id, fk.ref.split(".")[0]) for fk in foreign_keys]
+        bridge_tables = find_bridge_tables(candidate_tables, edges, fact_tables)
+        for bridge_table in bridge_tables:
+            table_to_columns_map[bridge_table] = []
+        logger.info(f"候选表：{candidate_tables}，补充的中间表：{bridge_tables}")
+
+        # 6. 补齐主外键字段
         # 主外键通常不会出现在用户问题里，单靠向量召回容易漏掉；
         # 但多表查询的 Join 路径必须依赖它们，所以每张候选表都要兜底补齐。
         for table_id in table_to_columns_map.keys():
@@ -101,7 +118,7 @@ async def merge_retrieved_info(
                 if key_column.id not in column_ids:
                     table_to_columns_map[table_id].append(key_column)
 
-        # 6. 生成表结构上下文
+        # 7. 生成表结构上下文
         # 数据库实体里可能包含入库和索引用字段，传给模型前只保留必要信息，
         # 让后续过滤和 SQL 生成节点面对的是更稳定的 TableInfoState 结构。
         table_infos: list[TableInfoState] = []
@@ -109,8 +126,9 @@ async def merge_retrieved_info(
             table_info: TableInfo = await meta_mysql_repository.get_table_info_by_id(
                 table_id
             )
-            columns = [
-                ColumnInfoState(
+            columns: list[ColumnInfoState] = []
+            for column_info in column_infos:
+                column_state = ColumnInfoState(
                     name=column_info.name,
                     type=column_info.type,
                     role=column_info.role,
@@ -118,8 +136,10 @@ async def merge_retrieved_info(
                     description=column_info.description,
                     alias=column_info.alias,
                 )
-                for column_info in column_infos
-            ]
+                # 只有外键才带 ref，避免给每个字段都加一行 ref: null 干扰模型
+                if column_info.ref:
+                    column_state["ref"] = column_info.ref
+                columns.append(column_state)
             table_info_state = TableInfoState(
                 name=table_info.name,
                 role=table_info.role,
@@ -128,7 +148,7 @@ async def merge_retrieved_info(
             )
             table_infos.append(table_info_state)
 
-        # 7. 生成指标上下文
+        # 8. 生成指标上下文
         # 指标上下文保留名称 描述 别名和依赖字段，足够让模型理解业务口径。
         metric_infos: list[MetricInfoState] = [
             MetricInfoState(

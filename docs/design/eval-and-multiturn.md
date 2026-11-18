@@ -72,29 +72,30 @@
 放在 `evals/datasets/*.yaml`，单轮和多轮使用同一种格式（单轮就是只有一轮的会话）：
 
 ```yaml
-- id: gmv_by_region_q1
-  tags: [多表, 指标, 分组, 排序]          # 用来按类别统计准确率
+- id: paid_amount_by_area_2025q1
+  tags: [多表, 指标, 分组, 排序, 支付口径]  # 用来按类别统计准确率
   difficulty: medium                      # easy / medium / hard
-  today: "2025-03-31"                     # 本题注入的“今天”，保证相对时间可复现
+  today: "2025-12-31"                     # 本题注入的“今天”，保证相对时间可复现
   turns:
-    - question: 统计 2025 年第一季度各大区的 GMV，并按 GMV 从高到低排序
+    - question: 统计 2025 年第一季度各大区的销售额，并从高到低排序
       paraphrases:                        # 借鉴 Genie：同一个标准 SQL 配 2~4 种问法
         - 25 年 Q1 每个大区卖了多少钱，从高到低排
-        - 第一季度各区域成交总额排名
+        - 今年一季度各区域的支付金额排名
       gold_sql: |
-        select r.region_name, sum(f.order_amount) as gmv
-        from fact_order f
-        join dim_region r on f.region_id = r.region_id
-        join dim_date d on f.date_id = d.date_id
-        where d.year = 2025 and d.quarter = 'Q1'
-        group by r.region_name
-        order by gmv desc
+        select r.area, sum(o.order_amount) as 支付金额
+        from fact_order o
+        join dim_region r on o.receiver_region_id = r.region_id
+        join dim_date d on o.pay_date_id = d.date_id
+        where o.pay_time is not null and d.year = 2025 and d.quarter = 1
+        group by r.area
+        order by 支付金额 desc
       expect:                             # 用于召回 / 过滤的环节归因
         tables: [fact_order, dim_region, dim_date]
-        columns: [fact_order.order_amount, dim_region.region_name, dim_date.quarter]
-        metrics: [GMV]
+        columns: [fact_order.order_amount, fact_order.pay_time, dim_region.area, dim_date.quarter]
+        metrics: [支付金额]
         values: []
       order_matters: true                 # 有 ORDER BY 的题才比较行顺序
+      notes: “大区”默认按收货城市统计；若按用户常住城市，属于另一道题
 ```
 
 几类特殊题目：
@@ -108,9 +109,10 @@
 | 维度 | 取值 |
 | --- | --- |
 | 表数量 | 单表 / 两表 join / 三表及以上 |
-| 是否用到指标 | GMV / AOV / ASP / 不用指标 |
+| 是否用到指标 | 下单金额 / 支付金额 / 客单价 / 退款率等 / 不用指标 |
 | 是否用到字段取值 | 地区、品类、品牌、会员等级等枚举值 |
-| 时间表达 | 绝对时间 / 相对时间（本月、最近 7 天）/ 不限时间 |
+| 时间表达 | 绝对时间 / 相对时间（本月、最近 7 天、去年同期）/ 不限时间 |
+| 口径陷阱 | 下单 vs 支付 / 订单头 vs 明细（扇出）/ 退款扣减 / 日期与地区的角色 / 去重计数（见 `dw-schema-v2.md` 第六节） |
 | 结果形态 | 单值 / 分组 / TopN / 明细 / 空结果 |
 | 特殊 | 安全拒答 / 歧义 |
 
@@ -205,7 +207,7 @@ LLM 调用即使 `temperature=0` 也不完全确定，而且每次全量跑都�
 
 ### 3.1 要支持的对话场景
 
-| 类型 | 例子（接在“统计 2025 年 Q1 各大区的 GMV”之后） | 处理方式 |
+| 类型 | 例子（接在“统计 2025 年 Q1 各大区的销售额”之后） | 处理方式 |
 | --- | --- | --- |
 | 省略 / 指代 | “那华东呢？” | 改写成完整问题，走单轮流程 |
 | 追加条件 | “只看黄金会员” | 改写，或在上一轮 SQL 上增量修改 |
@@ -238,7 +240,7 @@ START
   ```json
   {
     "intent": "refine",
-    "standalone_question": "统计 2025 年第一季度华东大区的 GMV",
+    "standalone_question": "统计 2025 年第一季度华东大区的销售额",
     "based_on_turn": 2,
     "clarify_question": null
   }
@@ -260,14 +262,14 @@ START
 | 层 | 存什么 | 存在哪 | 生命周期 |
 | --- | --- | --- | --- |
 | 会话内短期记忆 | 最近 K 轮的问题、改写、SQL、结果摘要；更早轮次的滚动摘要 | 自建表 `conversation_turn`（Meta MySQL）；需要 interrupt 时再加 LangGraph checkpointer | 跟随会话 |
-| 用户长期记忆 | 用户偏好：默认时间范围、常用口径（“销售额默认指 GMV”）、常看的维度 | LangGraph Store 或自建表 `user_memory` | 跨会话 |
+| 用户长期记忆 | 用户偏好：默认时间范围、常用口径（“销售额默认指支付金额”）、常看的维度 | LangGraph Store 或自建表 `user_memory` | 跨会话 |
 | 组织知识 | 人工验证过的“问题-SQL”对（Verified Queries） | Qdrant 新集合 + Meta MySQL | 长期，人工维护 |
 
 说明：
 
 - **为什么短期记忆用自建表而不是只用 checkpointer**：checkpointer 存的是整份图状态（包含召回结果、表结构等大对象），不方便查询，也不方便前端展示历史。会话历史本身就是业务数据，建议单独建表；checkpointer 只负责 interrupt 的暂停与恢复。LangGraph 官方提供 Postgres、SQLite 的 checkpointer，项目目前只用 MySQL，用 MySQL 需要社区实现或自己实现，可以先用内存实现 `InMemorySaver` 跑通流程，再换成持久化实现（SQLite 版需要安装 `langgraph-checkpoint-sqlite`，Postgres 版需要 `langgraph-checkpoint-postgres`）。
 - **结果不要整份存进上下文**：只存列名、行数、前 5 行，避免 token 膨胀。
-- **滚动摘要**：会话超过 K 轮时，把更早的轮次压缩成一段摘要（“用户在分析 2025Q1 各区域销售，关注华东和黄金会员”）。
+- **滚动摘要**：会话超过 K 轮时，把更早的轮次压缩成一段摘要（“用户在分析 2025 年一季度各区域销售，关注华东和金卡会员”）。
 - **Verified Queries**：用户点赞的问答经人工确认后，作为 few-shot 示例召回进 `generate_sql` 的 Prompt。这正好和评测方案中“点赞/点踩 → 题库”共用一套数据。
 
 ### 3.5 数据模型（Meta MySQL 新增两张表）
@@ -318,7 +320,7 @@ SSE 新增事件类型（同步修改 `frontend/src/types/agent.ts`）：
 {"type": "session", "conversation_id": "...", "turn_id": "..."}
 {"type": "rewrite", "standalone_question": "...", "intent": "refine"}
 {"type": "clarify", "question": "你说的“最近”是指最近 7 天还是本月？", "options": ["最近 7 天", "本月"]}
-{"type": "answer", "text": "华东的 GMV 最高，占比 38.2%"}
+{"type": "answer", "text": "华东的销售额最高，占比 38.2%"}
 ```
 
 注意：`App.tsx` 目前把所有非 progress/result 的事件都当作错误处理，新增事件类型时要一并修改；`StepRail.tsx` 也要加上新节点。
@@ -337,12 +339,12 @@ SSE 新增事件类型（同步修改 `frontend/src/types/agent.ts`）：
 ```yaml
 - id: mt_region_drilldown
   tags: [多轮, 省略, 下钻]
-  today: "2025-03-31"
+  today: "2025-12-31"
   turns:
-    - question: 统计 2025 年第一季度各大区的 GMV
+    - question: 统计 2025 年第一季度各大区的销售额
       gold_sql: ...
     - question: 那华东呢，按月拆开
-      gold_standalone: 统计 2025 年第一季度华东大区每个月的 GMV
+      gold_standalone: 统计 2025 年第一季度华东大区每个月的销售额
       gold_intent: drill_down
       gold_sql: ...
     - question: 哪个月最高

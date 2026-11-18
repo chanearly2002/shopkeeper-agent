@@ -1,184 +1,655 @@
+# 元数据知识库配置：描述教学数仓 dw 的表 字段和指标，供知识库构建脚本读取
+#
+# 字段属性：
+#   role   primary_key / foreign_key / dimension / measure
+#   sync   是否把该字段的全部去重取值写入 Elasticsearch，用于“华北”“金卡”这类取值召回；
+#          只对取值有限的文本字段开启
+#   ref    外键关联的目标字段（表名.字段名），所有 foreign_key 都必须填写；
+#          SQL 生成时 JOIN 条件按 ref 编写
+#
+# 表描述里写明“粒度”（一行代表什么），模型据此避免跨粒度关联导致的重复计算
+# 指标描述里写明计算公式，会原样进入 SQL 生成提示词，是统一业务口径的关键
+# 表结构设计说明见 docs/design/dw-schema-v2.md
+
 tables:
-  - name: dim_region
-    role: dim
-    description: 地区维度表，用于描述订单发生的地理区域信息。
-    columns:
-      - name: region_id
-        role: primary_key
-        description: 地区唯一标识。
-        alias: [地区ID, 区域ID]
-        sync: false
-
-      - name: province
-        role: dimension
-        description: 订单所属的省份名称。
-        alias: [省份, 省, 所在省份]
-        sync: true
-
-      - name: region_name
-        role: dimension
-        description: 订单所属的大区名称，如华东、华南等。
-        alias: [地区, 区域, 大区]
-        sync: true
-
-      - name: country
-        role: dimension
-        description: 地区所属国家名称。
-        alias: [国家, 国家名称]
-        sync: true
-
-  - name: dim_customer
-    role: dim
-    description: 客户维度表，描述下单客户的基本属性。
-    columns:
-      - name: customer_id
-        role: primary_key
-        description: 客户唯一标识。
-        alias: [客户ID, 用户ID]
-        sync: false
-
-      - name: customer_name
-        role: dimension
-        description: 客户名称。
-        alias: [客户名称, 用户名称]
-        sync: true
-
-      - name: gender
-        role: dimension
-        description: 客户性别。
-        alias: [性别]
-        sync: true
-
-      - name: member_level
-        role: dimension
-        description: 客户会员等级。
-        alias: [会员等级, 用户等级]
-        sync: true
-
-  - name: dim_product
-    role: dim
-    description: 商品维度表，描述商品的基本属性信息。
-    columns:
-      - name: product_id
-        role: primary_key
-        description: 商品唯一标识。
-        alias: [商品ID, 产品ID]
-        sync: false
-
-      - name: product_name
-        role: dimension
-        description: 商品名称。
-        alias: [商品名称, 产品名称]
-        sync: true
-
-      - name: category
-        role: dimension
-        description: 商品所属品类。
-        alias: [商品类别, 品类, 分类]
-        sync: true
-
-      - name: brand
-        role: dimension
-        description: 商品品牌名称。
-        alias: [品牌, 品牌名称]
-        sync: true
-
+  # ---------------------------------------------------------------------------
+  # 维度表
+  # ---------------------------------------------------------------------------
   - name: dim_date
     role: dim
-    description: 时间维度表，用于多时间粒度分析。
+    description: 日期维度表，粒度为一天，覆盖 2024-01-01 至 2025-12-31。事实表中的下单日期、支付日期、退款申请日期、行为日期都关联到这张表。
     columns:
       - name: date_id
         role: primary_key
-        description: 日期唯一标识，格式 yyyyMMdd。
-        alias: [日期ID, 日期]
+        description: 日期键，整数，格式 yyyyMMdd，例如 20250618。
+        alias: [日期ID, 日期键]
         sync: false
-
+      - name: full_date
+        role: dimension
+        description: 日期，DATE 类型。
+        alias: [日期]
+        sync: false
       - name: year
         role: dimension
-        description: 年份。
+        description: 年份，例如 2025。
         alias: [年, 年份]
         sync: false
-
       - name: quarter
         role: dimension
-        description: 季度。
+        description: 季度，整数 1 到 4。
         alias: [季度]
-        sync: true
-
+        sync: false
       - name: month
         role: dimension
-        description: 月份。
+        description: 月份，整数 1 到 12。
         alias: [月, 月份]
         sync: false
-
       - name: day
         role: dimension
-        description: 日。
-        alias: [日, 天]
+        description: 日，整数 1 到 31。
+        alias: [日, 号]
+        sync: false
+      - name: week_of_year
+        role: dimension
+        description: ISO 周序号。
+        alias: [周, 第几周, 周次]
+        sync: false
+      - name: day_of_week
+        role: dimension
+        description: 星期几，1 表示周一，7 表示周日。
+        alias: [星期, 星期几, 周几]
+        sync: false
+      - name: is_weekend
+        role: dimension
+        description: 是否周末，1 是 0 否。
+        alias: [周末, 是否周末]
+        sync: false
+      - name: is_holiday
+        role: dimension
+        description: 是否法定节假日，1 是 0 否。
+        alias: [节假日, 是否节假日, 假期]
+        sync: false
+      - name: holiday_name
+        role: dimension
+        description: 法定节假日名称，如春节、国庆节，非节假日为空。
+        alias: [节日, 节假日名称]
+        sync: true
+
+  - name: dim_region
+    role: dim
+    description: 地区维度表，粒度为一个城市。用户常住城市（dim_user.region_id）和订单收货城市（fact_order.receiver_region_id）都关联到这张表。
+    columns:
+      - name: region_id
+        role: primary_key
+        description: 城市编码。
+        alias: [城市编码, 地区ID]
+        sync: false
+      - name: province
+        role: dimension
+        description: 省份名称，如浙江省、北京市。
+        alias: [省, 省份]
+        sync: true
+      - name: city
+        role: dimension
+        description: 城市名称，如杭州市。
+        alias: [城市, 市]
+        sync: true
+      - name: city_tier
+        role: dimension
+        description: 城市等级：一线、新一线、二线、三线及以下。
+        alias: [城市等级, 城市级别, 城市线级]
+        sync: true
+      - name: area
+        role: dimension
+        description: 大区：华东、华北、华南、华中、西南、西北、东北。
+        alias: [大区, 区域, 地区]
+        sync: true
+
+  - name: dim_user
+    role: dim
+    description: 用户维度表，粒度为一个用户。
+    columns:
+      - name: user_id
+        role: primary_key
+        description: 用户唯一标识。
+        alias: [用户ID, 买家ID, 客户ID]
+        sync: false
+      - name: user_name
+        role: dimension
+        description: 用户昵称。
+        alias: [用户名, 昵称, 用户昵称]
+        sync: false
+      - name: gender
+        role: dimension
+        description: 性别：男、女、未知。
+        alias: [性别]
+        sync: true
+      - name: age_range
+        role: dimension
+        description: 年龄段：18-24、25-29、30-34、35-39、40-49、50及以上。
+        alias: [年龄段, 年龄, 年龄层]
+        sync: true
+      - name: region_id
+        role: foreign_key
+        description: 用户常住城市，注意与订单的收货城市区分。
+        alias: [常住城市, 所在城市, 用户城市]
+        sync: false
+        ref: dim_region.region_id
+      - name: member_level
+        role: dimension
+        description: 会员等级，从低到高：普通会员、银卡、金卡、铂金、钻石。
+        alias: [会员等级, 用户等级, 会员级别]
+        sync: true
+      - name: is_plus
+        role: dimension
+        description: 是否付费会员（类似 88VIP、PLUS 会员），1 是 0 否。
+        alias: [付费会员, PLUS会员, 是否付费会员]
+        sync: false
+      - name: register_date
+        role: dimension
+        description: 注册日期，DATE 类型。
+        alias: [注册日期, 注册时间]
+        sync: false
+      - name: register_channel
+        role: dimension
+        description: 注册渠道：APP、小程序、PC、H5。
+        alias: [注册渠道, 注册来源]
+        sync: true
+
+  - name: dim_category
+    role: dim
+    description: 类目维度表，粒度为一个三级（叶子）类目，包含一级、二级、三级类目名称。商品通过 dim_sku.category_id 关联到这张表。
+    columns:
+      - name: category_id
+        role: primary_key
+        description: 三级类目 ID。
+        alias: [类目ID, 品类ID]
+        sync: false
+      - name: category_l1
+        role: dimension
+        description: 一级类目，如手机数码、家用电器、服饰鞋包、美妆个护、食品饮料、母婴、家居日用。
+        alias: [一级类目, 一级品类, 大类, 品类]
+        sync: true
+      - name: category_l2
+        role: dimension
+        description: 二级类目，如手机通讯、护肤、女装。
+        alias: [二级类目, 二级品类]
+        sync: true
+      - name: category_l3
+        role: dimension
+        description: 三级类目，如手机、面霜、连衣裙。
+        alias: [三级类目, 三级品类, 细分类目]
+        sync: true
+
+  - name: dim_shop
+    role: dim
+    description: 店铺维度表，粒度为一个店铺。
+    columns:
+      - name: shop_id
+        role: primary_key
+        description: 店铺唯一标识。
+        alias: [店铺ID, 商家ID]
+        sync: false
+      - name: shop_name
+        role: dimension
+        description: 店铺名称，如某品牌官方旗舰店。
+        alias: [店铺名称, 店铺, 商家, 店名]
+        sync: true
+      - name: shop_type
+        role: dimension
+        description: 店铺类型：自营、旗舰店、专营店、专卖店。
+        alias: [店铺类型, 店铺性质]
+        sync: true
+      - name: main_category_l1
+        role: dimension
+        description: 店铺主营的一级类目。
+        alias: [主营类目, 主营品类]
+        sync: true
+      - name: shop_score
+        role: measure
+        description: 店铺综合评分，4.00 到 5.00。
+        alias: [店铺评分, 评分, DSR]
+        sync: false
+      - name: open_date
+        role: dimension
+        description: 开店日期。
+        alias: [开店日期, 开店时间]
         sync: false
 
+  - name: dim_sku
+    role: dim
+    description: 商品维度表，粒度为一个 SKU（同一款商品的不同规格是不同 SKU，共享同一个 spu_id）。
+    columns:
+      - name: sku_id
+        role: primary_key
+        description: SKU 唯一标识。
+        alias: [商品ID, SKU, 商品编号]
+        sync: false
+      - name: spu_id
+        role: dimension
+        description: SPU ID，同一款商品的不同规格共享。
+        alias: [SPU, 款式ID, 款号]
+        sync: false
+      - name: sku_name
+        role: dimension
+        description: 商品名称，包含品牌、产品线和规格，如“华为 影像手机 256GB 黑色”。
+        alias: [商品名称, 商品, 产品名称, 产品]
+        sync: true
+      - name: category_id
+        role: foreign_key
+        description: 商品所属的三级类目。
+        alias: [类目ID, 品类ID]
+        sync: false
+        ref: dim_category.category_id
+      - name: brand_name
+        role: dimension
+        description: 品牌名称。
+        alias: [品牌, 品牌名称]
+        sync: true
+      - name: shop_id
+        role: foreign_key
+        description: 商品所属的店铺。
+        alias: [店铺ID]
+        sync: false
+        ref: dim_shop.shop_id
+      - name: list_price
+        role: measure
+        description: 商品标价（划线价），单位元。实际成交价见订单明细的 unit_price。
+        alias: [标价, 原价, 划线价]
+        sync: false
+      - name: cost_price
+        role: measure
+        description: 商品成本价，单位元，用于计算毛利。
+        alias: [成本价, 成本, 进价]
+        sync: false
+      - name: launch_date
+        role: dimension
+        description: 商品上架日期。
+        alias: [上架日期, 上市日期, 上新时间]
+        sync: false
+      - name: sku_status
+        role: dimension
+        description: 商品状态：在售、下架。
+        alias: [商品状态, 在售状态]
+        sync: true
+
+  - name: dim_activity
+    role: dim
+    description: 营销活动维度表，粒度为一个活动。订单明细通过 activity_id 关联到这张表。大促活动有明确的起止日期；日常活动（满减、秒杀、优惠券、直降）覆盖全年。
+    columns:
+      - name: activity_id
+        role: primary_key
+        description: 活动唯一标识。
+        alias: [活动ID]
+        sync: false
+      - name: activity_name
+        role: dimension
+        description: 活动名称，如“2025年618大促”“2024年双11”“日常满199减20”。
+        alias: [活动名称, 活动, 大促, 促销活动]
+        sync: true
+      - name: activity_type
+        role: dimension
+        description: 活动类型：大促、满减、直降、秒杀、优惠券。
+        alias: [活动类型, 促销类型]
+        sync: true
+      - name: start_date
+        role: dimension
+        description: 活动开始日期。
+        alias: [活动开始日期, 开始时间]
+        sync: false
+      - name: end_date
+        role: dimension
+        description: 活动结束日期。
+        alias: [活动结束日期, 结束时间]
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # 事实表
+  # ---------------------------------------------------------------------------
   - name: fact_order
     role: fact
-    description: 订单事实表，记录订单数量和金额等核心指标。
+    description: 订单事实表，粒度为一笔订单（一个用户在一个店铺的一次下单）。包含未支付和已取消的订单；已支付订单的 pay_time 不为空。订单级金额（order_amount 等）不能与订单明细表关联后再求和，否则会被重复计算。
     columns:
       - name: order_id
         role: primary_key
-        description: 订单唯一标识。
-        alias: [订单ID]
+        description: 订单号。
+        alias: [订单号, 订单ID, 订单编号]
         sync: false
-
-      - name: customer_id
+      - name: user_id
         role: foreign_key
-        description: 关联客户维度的外键。
-        alias: [客户ID, 用户ID]
+        description: 下单用户。
+        alias: [用户ID, 买家ID]
         sync: false
-
-      - name: product_id
+        ref: dim_user.user_id
+      - name: shop_id
         role: foreign_key
-        description: 关联商品维度的外键。
-        alias: [商品ID, 产品ID]
+        description: 下单的店铺。
+        alias: [店铺ID]
         sync: false
-
-      - name: date_id
+        ref: dim_shop.shop_id
+      - name: receiver_region_id
         role: foreign_key
-        description: 关联时间维度的外键。
-        alias: [日期, 下单日期]
+        description: 收货城市，注意与用户常住城市（dim_user.region_id）区分。
+        alias: [收货城市, 收货地区, 发货目的地]
         sync: false
-
-      - name: region_id
+        ref: dim_region.region_id
+      - name: order_date_id
         role: foreign_key
-        description: 关联地区维度的外键。
-        alias: [地区ID, 区域ID]
+        description: 下单日期，格式 yyyyMMdd。
+        alias: [下单日期]
         sync: false
-
-      - name: order_quantity
+        ref: dim_date.date_id
+      - name: order_time
+        role: dimension
+        description: 下单时间，DATETIME。
+        alias: [下单时间, 拍下时间]
+        sync: false
+      - name: pay_date_id
+        role: foreign_key
+        description: 支付日期，格式 yyyyMMdd，未支付为空。
+        alias: [支付日期, 付款日期]
+        sync: false
+        ref: dim_date.date_id
+      - name: pay_time
+        role: dimension
+        description: 支付时间，DATETIME，未支付为空。判断订单是否已支付以 pay_time IS NOT NULL 为准。
+        alias: [支付时间, 付款时间, 成交时间]
+        sync: false
+      - name: platform
+        role: dimension
+        description: 下单终端：APP、小程序、PC、H5。
+        alias: [下单终端, 渠道, 平台, 终端]
+        sync: true
+      - name: payment_method
+        role: dimension
+        description: 支付方式：支付宝、微信支付、银行卡、花呗分期，未支付为空。
+        alias: [支付方式, 付款方式]
+        sync: true
+      - name: order_status
+        role: dimension
+        description: 订单状态：待支付、已取消、已支付、已发货、已完成。退款记录在退款事实表，不改变订单状态。
+        alias: [订单状态]
+        sync: true
+      - name: item_quantity
         role: measure
-        description: 订单中商品的购买数量。
-        alias: [销量, 购买数量, 件数]
+        description: 订单内商品总件数。
+        alias: [件数, 商品件数, 购买件数]
         sync: false
-
+      - name: total_amount
+        role: measure
+        description: 商品总额，等于订单明细 item_amount 之和，单位元。
+        alias: [商品总额, 商品金额]
+        sync: false
+      - name: discount_amount
+        role: measure
+        description: 订单优惠总额，等于订单明细 discount_amount 之和，单位元。
+        alias: [优惠金额, 优惠总额, 折扣金额]
+        sync: false
+      - name: freight_amount
+        role: measure
+        description: 运费，单位元。
+        alias: [运费]
+        sync: false
       - name: order_amount
         role: measure
-        description: 订单金额。
-        alias: [销售额, 订单金额, 收入]
+        description: 订单应付金额 = 商品总额 - 优惠总额 + 运费，单位元。订单已支付时即为实付金额。
+        alias: [订单金额, 应付金额, 实付金额, 订单应付金额]
         sync: false
 
+  - name: fact_order_item
+    role: fact
+    description: 订单明细事实表，粒度为订单中的一个 SKU。订单的下单时间、支付时间、状态、用户、店铺需要通过 order_id 关联订单表获取。按商品、类目、品牌、活动统计金额时使用本表的金额字段。
+    columns:
+      - name: order_item_id
+        role: primary_key
+        description: 订单明细唯一标识。
+        alias: [订单明细ID, 订单行ID]
+        sync: false
+      - name: order_id
+        role: foreign_key
+        description: 所属订单。
+        alias: [订单号, 订单ID]
+        sync: false
+        ref: fact_order.order_id
+      - name: sku_id
+        role: foreign_key
+        description: 购买的商品。
+        alias: [商品ID, SKU]
+        sync: false
+        ref: dim_sku.sku_id
+      - name: activity_id
+        role: foreign_key
+        description: 该商品参与的营销活动，未参与为空。
+        alias: [活动ID, 参与活动]
+        sync: false
+        ref: dim_activity.activity_id
+      - name: quantity
+        role: measure
+        description: 购买件数。
+        alias: [件数, 销量, 购买数量]
+        sync: false
+      - name: unit_price
+        role: measure
+        description: 成交单价，单位元，可能低于商品标价。
+        alias: [成交单价, 成交价, 单价]
+        sync: false
+      - name: item_amount
+        role: measure
+        description: 商品金额 = 成交单价 × 件数，单位元，未扣除优惠。
+        alias: [商品金额, 明细金额]
+        sync: false
+      - name: discount_amount
+        role: measure
+        description: 分摊到该商品的优惠金额，单位元。
+        alias: [分摊优惠, 优惠金额]
+        sync: false
+      - name: pay_amount
+        role: measure
+        description: 该商品的分摊实付金额 = 商品金额 - 分摊优惠，单位元，不含运费。
+        alias: [商品实付金额, 明细实付金额, 分摊实付]
+        sync: false
+
+  - name: fact_refund
+    role: fact
+    description: 退款事实表，粒度为一次退款申请，对应一个订单明细。只有 refund_status 为“退款成功”的记录才是实际发生的退款。
+    columns:
+      - name: refund_id
+        role: primary_key
+        description: 退款单号。
+        alias: [退款单号, 退款ID, 售后单号]
+        sync: false
+      - name: order_item_id
+        role: foreign_key
+        description: 申请退款的订单明细。
+        alias: [订单明细ID]
+        sync: false
+        ref: fact_order_item.order_item_id
+      - name: order_id
+        role: foreign_key
+        description: 所属订单。
+        alias: [订单号, 订单ID]
+        sync: false
+        ref: fact_order.order_id
+      - name: user_id
+        role: foreign_key
+        description: 申请退款的用户。
+        alias: [用户ID]
+        sync: false
+        ref: dim_user.user_id
+      - name: apply_date_id
+        role: foreign_key
+        description: 退款申请日期，格式 yyyyMMdd。
+        alias: [申请日期, 退款日期, 退款申请日期]
+        sync: false
+        ref: dim_date.date_id
+      - name: apply_time
+        role: dimension
+        description: 退款申请时间。
+        alias: [申请时间, 退款申请时间]
+        sync: false
+      - name: refund_type
+        role: dimension
+        description: 退款类型：仅退款、退货退款。
+        alias: [退款类型, 售后类型]
+        sync: true
+      - name: refund_reason
+        role: dimension
+        description: 退款原因：质量问题、尺码不合适、不喜欢、发错货、物流太慢、其他。
+        alias: [退款原因, 退货原因, 售后原因]
+        sync: true
+      - name: refund_status
+        role: dimension
+        description: 退款状态：退款中、退款成功、已拒绝、已撤销。
+        alias: [退款状态, 售后状态]
+        sync: true
+      - name: refund_quantity
+        role: measure
+        description: 退款件数。
+        alias: [退款件数, 退货件数]
+        sync: false
+      - name: refund_amount
+        role: measure
+        description: 退款金额，单位元。
+        alias: [退款金额, 退款额]
+        sync: false
+      - name: finish_time
+        role: dimension
+        description: 退款完成时间，退款中为空。
+        alias: [退款完成时间]
+        sync: false
+
+  - name: fact_user_behavior
+    role: fact
+    description: 用户行为事实表，粒度为用户对某个商品的一次行为，行为类型为浏览、收藏、加购；下单数据见订单表。
+    columns:
+      - name: behavior_id
+        role: primary_key
+        description: 行为记录唯一标识。
+        alias: [行为ID]
+        sync: false
+      - name: user_id
+        role: foreign_key
+        description: 产生行为的用户。
+        alias: [用户ID, 访客ID]
+        sync: false
+        ref: dim_user.user_id
+      - name: sku_id
+        role: foreign_key
+        description: 行为对应的商品。
+        alias: [商品ID, SKU]
+        sync: false
+        ref: dim_sku.sku_id
+      - name: behavior_type
+        role: dimension
+        description: 行为类型：浏览、收藏、加购。
+        alias: [行为类型, 用户行为]
+        sync: true
+      - name: behavior_time
+        role: dimension
+        description: 行为发生时间。
+        alias: [行为时间, 浏览时间]
+        sync: false
+      - name: date_id
+        role: foreign_key
+        description: 行为发生日期，格式 yyyyMMdd。
+        alias: [行为日期, 浏览日期]
+        sync: false
+        ref: dim_date.date_id
+      - name: platform
+        role: dimension
+        description: 行为发生的终端：APP、小程序、PC、H5。
+        alias: [终端, 渠道, 平台]
+        sync: true
+
 metrics:
-  # description 会原样进入 SQL 生成提示词，写清计算口径，模型才能按统一口径生成 SQL
-  - name: GMV
-    description: 全称Gross Merchandise Value，表示所有订单的成交金额总和。计算口径：SUM(fact_order.order_amount)。
+  - name: 下单金额
+    description: 全称下单金额（GMV，拍下口径），统计期内所有订单的应付金额之和，包含未支付和已取消的订单。计算口径：SUM(fact_order.order_amount)，按下单日期 order_date_id 筛选时间。
     relevant_columns:
       - fact_order.order_amount
-    alias: [成交总额, 订单总额, 销售总额, 成交额]
-  - name: AOV
-    description: 全称Average Order Value，表示平均每笔订单的成交金额。计算口径：SUM(fact_order.order_amount) / COUNT(DISTINCT fact_order.order_id)。
+      - fact_order.order_date_id
+    alias: [GMV, 拍下金额, 下单总额]
+  - name: 支付金额
+    description: 已支付订单的实付金额之和，是“销售额”“成交额”的默认口径。计算口径：SUM(fact_order.order_amount)，条件 fact_order.pay_time IS NOT NULL，按支付日期 pay_date_id 筛选时间。按商品、类目、品牌、活动拆分时改用 SUM(fact_order_item.pay_amount)（不含运费），同样只统计已支付订单。
+    relevant_columns:
+      - fact_order.order_amount
+      - fact_order.pay_time
+      - fact_order.pay_date_id
+    alias: [销售额, 成交额, 成交金额, GSV, 实付金额]
+  - name: 净支付金额
+    description: 扣除退款后的支付金额。计算口径：支付金额 - 退款成功金额，其中退款成功金额 = SUM(fact_refund.refund_amount)，条件 fact_refund.refund_status = '退款成功'。
+    relevant_columns:
+      - fact_order.order_amount
+      - fact_order.pay_time
+      - fact_refund.refund_amount
+      - fact_refund.refund_status
+    alias: [净销售额, 净成交额, 实收金额]
+  - name: 下单订单数
+    description: 统计期内下单的订单数量，包含未支付和已取消订单。计算口径：COUNT(fact_order.order_id)。
+    relevant_columns:
+      - fact_order.order_id
+      - fact_order.order_date_id
+    alias: [订单数, 订单量, 下单量]
+  - name: 支付订单数
+    description: 已支付的订单数量。计算口径：COUNT(fact_order.order_id)，条件 fact_order.pay_time IS NOT NULL。
+    relevant_columns:
+      - fact_order.order_id
+      - fact_order.pay_time
+    alias: [成交订单数, 支付订单量]
+  - name: 支付买家数
+    description: 有已支付订单的去重用户数。计算口径：COUNT(DISTINCT fact_order.user_id)，条件 fact_order.pay_time IS NOT NULL。
+    relevant_columns:
+      - fact_order.user_id
+      - fact_order.pay_time
+    alias: [购买人数, 成交用户数, 支付用户数, 买家数]
+  - name: 客单价
+    description: 平均每个支付买家的支付金额。计算口径：支付金额 / 支付买家数，即 SUM(order_amount) / COUNT(DISTINCT user_id)，均限已支付订单。
+    relevant_columns:
+      - fact_order.order_amount
+      - fact_order.user_id
+      - fact_order.pay_time
+    alias: [人均消费, 人均支付金额]
+  - name: 笔单价
+    description: 平均每笔支付订单的金额（AOV）。计算口径：支付金额 / 支付订单数，即 SUM(order_amount) / COUNT(order_id)，均限已支付订单。
     relevant_columns:
       - fact_order.order_amount
       - fact_order.order_id
-    alias: [平均订单金额, 订单均价, 笔单价]
-  - name: ASP
-    description: 全称Average Selling Price，表示平均每件商品的成交金额。计算口径：SUM(fact_order.order_amount) / SUM(fact_order.order_quantity)。
+      - fact_order.pay_time
+    alias: [AOV, 平均订单金额, 订单均价]
+  - name: 件单价
+    description: 平均每件商品的实付金额（ASP）。计算口径：SUM(fact_order_item.pay_amount) / SUM(fact_order_item.quantity)，只统计已支付订单的明细。
     relevant_columns:
+      - fact_order_item.pay_amount
+      - fact_order_item.quantity
+      - fact_order.pay_time
+    alias: [ASP, 平均售价, 平均单价, 商品均价]
+  - name: 毛利
+    description: 已支付订单明细的实付金额减去商品成本。计算口径：SUM(fact_order_item.pay_amount - dim_sku.cost_price * fact_order_item.quantity)，只统计已支付订单。毛利率 = 毛利 / SUM(fact_order_item.pay_amount)。
+    relevant_columns:
+      - fact_order_item.pay_amount
+      - fact_order_item.quantity
+      - dim_sku.cost_price
+      - fact_order.pay_time
+    alias: [毛利额, 毛利润, 毛利率]
+  - name: 退款率
+    description: 退款成功金额占支付金额的比例。计算口径：SUM(fact_refund.refund_amount)（条件 refund_status = '退款成功'）/ 支付金额。按类目等明细维度计算时，分母使用 SUM(fact_order_item.pay_amount)。
+    relevant_columns:
+      - fact_refund.refund_amount
+      - fact_refund.refund_status
       - fact_order.order_amount
-      - fact_order.order_quantity
-    alias: [件单价, 平均单价, 平均售价, 商品均价]
+      - fact_order.pay_time
+    alias: [退款金额占比, 退货率, 售后率]
+  - name: 浏览转化率
+    description: 浏览过商品的用户中完成支付的比例。计算口径：同一时间范围内，支付买家数 / 浏览用户数，浏览用户数 = COUNT(DISTINCT fact_user_behavior.user_id)，条件 behavior_type = '浏览'。
+    relevant_columns:
+      - fact_user_behavior.user_id
+      - fact_user_behavior.behavior_type
+      - fact_order.user_id
+      - fact_order.pay_time
+    alias: [购买转化率, 访购率, 转化率]
+  - name: 复购率
+    description: 统计期内支付订单数不少于 2 笔的买家占支付买家的比例。计算口径：COUNT(支付订单数 >= 2 的用户) / 支付买家数，均只统计已支付订单。
+    relevant_columns:
+      - fact_order.user_id
+      - fact_order.order_id
+      - fact_order.pay_time
+    alias: [回购率, 重复购买率]

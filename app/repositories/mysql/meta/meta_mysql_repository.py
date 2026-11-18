@@ -98,6 +98,19 @@ class MetaMySQLRepository:
         else:
             return None
 
+    async def get_table_roles(self) -> dict[str, str]:
+        """查询全部表的角色（fact / dim），关联路径补全时用来区分事实表"""
+        result = await self.session.execute(
+            select(TableInfoMySQL.id, TableInfoMySQL.role)
+        )
+        return {table_id: role for table_id, role in result.all()}
+
+    async def get_foreign_key_columns(self) -> list[ColumnInfo]:
+        """查询全部填写了 ref 的外键字段，用来构建表之间的关联关系图"""
+        stmt = select(ColumnInfoMySQL).where(ColumnInfoMySQL.ref.is_not(None))
+        result = await self.session.scalars(stmt)
+        return [ColumnInfoMapper.to_entity(model) for model in result.all()]
+
     async def get_key_columns_by_table_id(self, table_id: str) -> list[ColumnInfo]:
         """查询指定表的主外键字段，避免 Join 关键字段被向量召回漏掉"""
 

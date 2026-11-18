@@ -33,7 +33,8 @@ async def add_extra_context(state: DataAgentState, runtime: Runtime[DataAgentCon
         )
         date_str = today.strftime("%Y-%m-%d")
         weekday = today.strftime("%A")
-        quarter = f"Q{(today.month - 1) // 3 + 1}"
+        # 季度用整数，和 dim_date.quarter 的类型一致，避免模型写出 quarter = 'Q4' 这种查不到数据的条件
+        quarter = (today.month - 1) // 3 + 1
         date_info = DateInfoState(date=date_str, weekday=weekday, quarter=quarter)
 
         # 数据库方言和版本会影响函数名 日期运算 limit 语法等 SQL 细节
