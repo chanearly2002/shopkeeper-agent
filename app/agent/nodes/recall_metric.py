@@ -4,7 +4,10 @@
 负责根据用户问题从指标向量知识库中召回候选指标
 它帮助 Agent 把“销售额 转化率 客单价”等业务表达映射到已定义指标
 实现路径和字段召回类似：关键词扩展 -> Embedding -> Qdrant 相似度检索 -> MetricInfo 去重
+所有检索词一次批量向量化，各检索词的 Qdrant 查询并发执行
 """
+
+import asyncio
 
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -48,14 +51,16 @@ async def recall_metric(state: DataAgentState, runtime: Runtime[DataAgentContext
         # 通用关键词和指标扩展词都参与召回，提升同义指标的命中率
         keywords = set(keywords + result)
 
+        # 所有检索词一次批量向量化，再并发检索，避免逐词串行等待网络往返
+        keywords = list(keywords)
+        embeddings = await embedding_client.aembed_documents(keywords)
+        search_results: list[list[MetricInfo]] = await asyncio.gather(
+            *(metric_qdrant_repository.search(embedding) for embedding in embeddings)
+        )
+
         # 用指标 id 做唯一键，避免多个关键词命中同一个指标时重复写入 state
         metric_info_map: dict[str, MetricInfo] = {}
-        for keyword in keywords:
-            # 指标库是向量集合，查询词必须先 Embedding 成 query vector
-            embedding = await embedding_client.aembed_query(keyword)
-            current_metric_infos: list[
-                MetricInfo
-            ] = await metric_qdrant_repository.search(embedding)
+        for current_metric_infos in search_results:
             for metric_info in current_metric_infos:
                 if metric_info.id not in metric_info_map:
                     metric_info_map[metric_info.id] = metric_info

@@ -4,7 +4,10 @@
 负责根据关键词从字段向量知识库中召回候选字段
 它解决的是“用户问题可能对应哪些数据库字段”的问题
 本章的主线是：关键词扩展 -> Embedding -> Qdrant 相似度检索 -> ColumnInfo 去重
+所有检索词一次批量向量化，各检索词的 Qdrant 查询并发执行
 """
+
+import asyncio
 
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -48,20 +51,23 @@ async def recall_column(state: DataAgentState, runtime: Runtime[DataAgentContext
         # 原始关键词和 LLM 扩展词一起参与召回；set 去重，避免重复请求同一关键词
         keywords = set(keywords + result)
 
+        # 所有检索词一次批量向量化，再并发检索，避免逐词串行等待网络往返
+        keywords = list(keywords)
+        embeddings = await embedding_client.aembed_documents(keywords)
+        search_results: list[list[ColumnInfo]] = await asyncio.gather(
+            *(column_qdrant_repository.search(embedding) for embedding in embeddings)
+        )
+
         # 用字段 id 做唯一键，因为多个关键词、同一字段的多个向量点都可能命中同一个字段
         column_info_map: dict[str, ColumnInfo] = {}
-        for keyword in keywords:
-            # 查询词必须先转成向量，才能和第 9 章写入 Qdrant 的字段向量做相似度检索
-            embedding = await embedding_client.aembed_query(keyword)
-            current_column_infos: list[
-                ColumnInfo
-            ] = await column_qdrant_repository.search(embedding)
+        for current_column_infos in search_results:
             for column_info in current_column_infos:
                 if column_info.id not in column_info_map:
                     column_info_map[column_info.id] = column_info
 
         # 写回 state 的是去重后的 ColumnInfo 列表，不暴露 Qdrant 原始 point 结构
         retrieved_column_infos: list[ColumnInfo] = list(column_info_map.values())
+        logger.info(f"检索到字段信息：{list(column_info_map.keys())}")
 
         writer({"type": "progress", "step": step, "status": "success"})
         return {"retrieved_column_infos": retrieved_column_infos}

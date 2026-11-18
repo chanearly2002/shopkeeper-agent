@@ -76,4 +76,8 @@ class DataAgentState(TypedDict):
 
     sql: str  # 生成或校正后的SQL
 
-    error: str  # 校验SQL时出现的错误信息
+    error: str | None  # 校验SQL时出现的错误信息，None 表示校验通过
+    correct_attempts: int  # 已经执行过的 SQL 修正次数，用来限制校验-修正循环
+
+    result: list[dict]  # 最终查询结果，最多 agent.max_result_rows 行
+    truncated: bool  # 结果是否因超过行数上限被截断
