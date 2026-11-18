@@ -226,6 +226,12 @@ uv run python -m app.scripts.build_meta_knowledge -c conf/meta_config.yaml
 
 这一步会把表字段元数据写入 MySQL，把字段和指标向量写入 Qdrant，并把字段真实取值写入 Elasticsearch。
 
+构建是幂等的，修改 `conf/meta_config.yaml` 后直接重跑即可。如果在配置里删除了整张表或某个指标，加上 `--reset` 先清空知识库再构建：
+
+```bash
+uv run python -m app.scripts.build_meta_knowledge -c conf/meta_config.yaml --reset
+```
+
 ### 8. 启动后端
 
 ```bash
