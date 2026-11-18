@@ -101,7 +101,7 @@ class AgentConfig:
     max_correct_attempts: int
     max_result_rows: int
     max_execution_ms: int
-    # 形如 2025-03-31；为 None 时使用真实当前日期
+    # 形如 2025-12-31；为 None 时使用真实当前日期
     today: Optional[str] = None
 
 

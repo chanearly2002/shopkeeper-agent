@@ -22,6 +22,8 @@ class ColumnConfig:
     description: str
     alias: list[str]
     sync: bool
+    # 外键关联的目标字段，格式 表名.字段名；只有 role 为 foreign_key 的字段需要填写
+    ref: Optional[str] = None
 
 
 @dataclass
@@ -59,3 +61,36 @@ class MetaConfig:
 
     tables: Optional[list[TableConfig]] = None
     metrics: Optional[list[MetricConfig]] = None
+
+
+def validate_meta_config(meta_config: MetaConfig) -> list[str]:
+    """
+    检查元数据配置的内部一致性，返回错误列表，为空表示通过
+
+    - 外键必须填写 ref，且 ref 指向配置中存在的字段；非外键不应填写 ref
+    - 指标依赖的字段必须在配置中存在
+    这些错误不会让构建报错，却会让模型拿到错误的关联关系，所以在构建前统一拦截
+    """
+    errors: list[str] = []
+    column_ids = {
+        f"{table.name}.{column.name}"
+        for table in meta_config.tables or []
+        for column in table.columns
+    }
+    for table in meta_config.tables or []:
+        for column in table.columns:
+            column_id = f"{table.name}.{column.name}"
+            if column.role == "foreign_key" and not column.ref:
+                errors.append(f"外键 {column_id} 缺少 ref")
+            if column.ref and column.role != "foreign_key":
+                errors.append(f"{column_id} 不是外键，却填写了 ref")
+            if column.ref and column.ref not in column_ids:
+                errors.append(f"{column_id} 的 ref 指向不存在的字段 {column.ref}")
+    if meta_config.tables:
+        for metric in meta_config.metrics or []:
+            for relevant_column in metric.relevant_columns:
+                if relevant_column not in column_ids:
+                    errors.append(
+                        f"指标 {metric.name} 依赖的字段 {relevant_column} 不存在"
+                    )
+    return errors

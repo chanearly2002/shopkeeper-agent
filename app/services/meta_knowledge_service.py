@@ -13,12 +13,14 @@
 """
 
 from dataclasses import asdict
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from omegaconf import OmegaConf
 
-from app.conf.meta_config import MetaConfig
+from app.conf.meta_config import MetaConfig, validate_meta_config
 from app.core.log import logger
 from app.entities.column_info import ColumnInfo
 from app.entities.column_metric import ColumnMetric
@@ -31,6 +33,19 @@ from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepositor
 from app.repositories.qdrant.base_qdrant_repository import make_point_id
 from app.repositories.qdrant.column_qdrant_repository import ColumnQdrantRepository
 from app.repositories.qdrant.metric_qdrant_repository import MetricQdrantRepository
+
+
+def _json_safe(value):
+    """把数仓样例值转换成可 JSON 序列化的形式：日期转 ISO 字符串，Decimal 转 float"""
+    if isinstance(value, (date, datetime)):
+        return (
+            value.isoformat(sep=" ")
+            if isinstance(value, datetime)
+            else value.isoformat()
+        )
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
 
 
 class MetaKnowledgeService:
@@ -89,10 +104,12 @@ class MetaKnowledgeService:
                     name=column.name,
                     type=column_types[column.name],
                     role=column.role,
-                    examples=column_values,
+                    # examples 会写入 MySQL 的 JSON 列和 Qdrant payload，必须可以 JSON 序列化
+                    examples=[_json_safe(v) for v in column_values],
                     description=column.description,
                     alias=column.alias,
                     table_id=table.name,
+                    ref=column.ref,
                 )
                 column_infos.append(column_info)
 
@@ -184,7 +201,7 @@ class MetaKnowledgeService:
                 current_values_infos = [
                     ValueInfo(
                         id=f"{column_info.id}.{current_column_value}",
-                        value=current_column_value,
+                        value=str(current_column_value),
                         column_id=column_info.id,
                     )
                     for current_column_value in current_column_values
@@ -296,12 +313,17 @@ class MetaKnowledgeService:
 
     async def build(self, config_path: Path, reset: bool = False):
         """读取配置并依次构建 Meta MySQL Qdrant 和 ES 中的元数据索引"""
-        if reset:
-            await self.reset()
-
         context = OmegaConf.load(config_path)
         schema = OmegaConf.structured(MetaConfig)
         meta_config: MetaConfig = OmegaConf.to_object(OmegaConf.merge(schema, context))
+
+        # 配置有问题时在清空或写入任何数据之前就停止
+        errors = validate_meta_config(meta_config)
+        if errors:
+            raise ValueError("元数据配置有误：\n" + "\n".join(errors))
+
+        if reset:
+            await self.reset()
 
         # 根据配置文件判断后续要进入哪条构建链路
         if meta_config.tables:

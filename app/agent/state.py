@@ -7,7 +7,7 @@ State 是 LangGraph 各节点之间传递和更新的共享数据
 SQL 生成闭环会继续写入候选 SQL 以及校验错误信息，用于控制校正或执行分支
 """
 
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from app.entities.column_info import ColumnInfo
 from app.entities.metric_info import MetricInfo
@@ -34,6 +34,8 @@ class ColumnInfoState(TypedDict):
     examples: list
     description: str
     alias: list[str]
+    # 只有外键才有：关联的目标字段 表名.字段名，SQL 的 JOIN 条件必须按它来写
+    ref: NotRequired[str]
 
 
 class TableInfoState(TypedDict):
@@ -50,7 +52,7 @@ class DateInfoState(TypedDict):
 
     date: str
     weekday: str
-    quarter: str
+    quarter: int
 
 
 class DBInfoState(TypedDict):
