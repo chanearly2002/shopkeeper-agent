@@ -8,6 +8,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 from omegaconf import OmegaConf
@@ -58,6 +59,10 @@ class QdrantConfig:
     host: str
     port: int
     embedding_size: int
+    column_collection: str
+    metric_collection: str
+    score_threshold: float
+    limit: int
 
 
 @dataclass
@@ -76,6 +81,8 @@ class ESConfig:
     host: str
     port: int
     index_name: str
+    min_score: float
+    limit: int
 
 
 @dataclass
@@ -85,6 +92,24 @@ class LLMConfig:
     model_name: str
     api_key: str
     base_url: str
+
+
+@dataclass
+class AgentConfig:
+    """问数智能体运行参数"""
+
+    max_correct_attempts: int
+    max_result_rows: int
+    max_execution_ms: int
+    # 形如 2025-03-31；为 None 时使用真实当前日期
+    today: Optional[str] = None
+
+
+@dataclass
+class ApiConfig:
+    """HTTP 接口配置"""
+
+    cors_origins: list[str]
 
 
 @dataclass
@@ -98,6 +123,8 @@ class AppConfig:
     embedding: EmbeddingConfig
     es: ESConfig
     llm: LLMConfig
+    agent: AgentConfig
+    api: ApiConfig
 
 
 # 从当前文件位置回到项目根目录，再定位到 conf/app_config.yaml

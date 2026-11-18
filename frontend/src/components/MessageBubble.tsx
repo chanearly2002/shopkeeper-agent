@@ -55,7 +55,9 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
           )}
 
           {!isUser && <StepRail steps={message.steps} />}
-          {!isUser && message.result !== undefined && <ResultTable data={message.result} />}
+          {!isUser && message.result !== undefined && (
+            <ResultTable data={message.result} meta={message.resultMeta} />
+          )}
 
           <div
             className={cn(

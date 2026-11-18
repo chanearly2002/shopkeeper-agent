@@ -2,7 +2,8 @@
 SQL 修正节点
 
 负责在 SQL 校验失败后，结合原问题 原 SQL 数据库错误和完整上下文做最小必要修正
-只有 validate_sql 写入错误信息时，LangGraph 才会进入这个分支
+只有 validate_sql 写入错误信息且修正次数未用完时，LangGraph 才会进入这个分支
+修正后的 SQL 会回到 validate_sql 重新校验，直到通过或达到 agent.max_correct_attempts
 """
 
 import yaml
@@ -14,6 +15,7 @@ from app.agent.context import DataAgentContext
 from app.agent.llm import llm
 from app.agent.state import DataAgentState
 from app.core.log import logger
+from app.core.sql_safety import clean_sql
 from app.prompt.prompt_loader import load_prompt
 
 
@@ -52,7 +54,7 @@ async def correct_sql(state: DataAgentState, runtime: Runtime[DataAgentContext])
         output_parser = StrOutputParser()
         chain = prompt | llm | output_parser
 
-        result = await chain.ainvoke(
+        raw_sql = await chain.ainvoke(
             {
                 # 与生成节点保持一致，用 YAML 向模型提供稳定 可读的结构化上下文
                 "table_infos": yaml.dump(
@@ -69,9 +71,11 @@ async def correct_sql(state: DataAgentState, runtime: Runtime[DataAgentContext])
             }
         )
 
-        logger.info(f"校正后的SQL：{result}")
+        corrected_sql = clean_sql(raw_sql)
+        attempts = state.get("correct_attempts", 0) + 1
+        logger.info(f"第 {attempts} 次校正后的SQL：{corrected_sql}")
         writer({"type": "progress", "step": step, "status": "success"})
-        return {"sql": result}
+        return {"sql": corrected_sql, "correct_attempts": attempts}
     except Exception as e:
         logger.error(f"{step} failed: {e}")
         writer({"type": "progress", "step": step, "status": "error"})

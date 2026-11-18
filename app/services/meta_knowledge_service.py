@@ -6,9 +6,12 @@
 
 当前这条主线已经覆盖表字段入库 字段向量索引 字段取值全文索引
 以及指标入库和指标向量索引构建逻辑
+
+构建是幂等的：配置里出现的表和指标会整体替换（先删旧字段 旧向量 旧取值再写入），
+所以修改 meta_config.yaml 后直接重跑即可；配置里已删除的表或指标不会被自动清理，
+需要时用 reset=True（命令行 --reset）先清空全部知识库再构建
 """
 
-import uuid
 from dataclasses import asdict
 from pathlib import Path
 
@@ -25,6 +28,7 @@ from app.entities.value_info import ValueInfo
 from app.repositories.es.value_es_repository import ValueESRepository
 from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
 from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepository
+from app.repositories.qdrant.base_qdrant_repository import make_point_id
 from app.repositories.qdrant.column_qdrant_repository import ColumnQdrantRepository
 from app.repositories.qdrant.metric_qdrant_repository import MetricQdrantRepository
 
@@ -92,8 +96,12 @@ class MetaKnowledgeService:
                 )
                 column_infos.append(column_info)
 
+        # 先删掉这些表下的旧字段再整体写入，配置里移除的字段也会一并清掉
         async with self.meta_mysql_repository.session.begin():
-            self.meta_mysql_repository.save_table_infos(table_infos)
+            await self.meta_mysql_repository.delete_column_infos_by_table_ids(
+                [table_info.id for table_info in table_infos]
+            )
+            await self.meta_mysql_repository.save_table_infos(table_infos)
             self.meta_mysql_repository.save_column_infos(column_infos)
 
         return column_infos
@@ -107,7 +115,7 @@ class MetaKnowledgeService:
             # 一个字段不会只生成一个向量点，而是把名字 描述 别名都拆开建立语义入口
             points.append(
                 {
-                    "id": uuid.uuid4(),
+                    "id": make_point_id(column_info.id, column_info.name),
                     "embedding_text": column_info.name,
                     "payload": asdict(column_info),
                 }
@@ -115,7 +123,7 @@ class MetaKnowledgeService:
 
             points.append(
                 {
-                    "id": uuid.uuid4(),
+                    "id": make_point_id(column_info.id, column_info.description),
                     "embedding_text": column_info.description,
                     "payload": asdict(column_info),
                 }
@@ -124,7 +132,7 @@ class MetaKnowledgeService:
             for alia in column_info.alias:
                 points.append(
                     {
-                        "id": uuid.uuid4(),
+                        "id": make_point_id(column_info.id, alia),
                         "embedding_text": alia,
                         "payload": asdict(column_info),
                     }
@@ -145,6 +153,10 @@ class MetaKnowledgeService:
         ids = [point["id"] for point in points]
         payloads = [point["payload"] for point in points]
 
+        # 先删除这些字段的旧向量点，再写入新点，别名删改后不会残留旧 point
+        await self.column_qdrant_repository.delete_by_entity_ids(
+            [column_info.id for column_info in column_infos]
+        )
         await self.column_qdrant_repository.upsert(ids, embeddings, payloads)
 
     async def _save_value_info_to_es(
@@ -176,9 +188,15 @@ class MetaKnowledgeService:
                         column_id=column_info.id,
                     )
                     for current_column_value in current_column_values
+                    # NULL 和空字符串没有检索价值，也会生成无意义的文档 id
+                    if current_column_value not in (None, "")
                 ]
                 value_infos.extend(current_values_infos)
 
+        # 本次构建涉及的字段先整体删除旧取值，再写入当前数仓里的真实取值
+        await self.value_es_repository.delete_by_column_ids(
+            [column_info.id for column_info in column_infos]
+        )
         await self.value_es_repository.index(value_infos)
 
     async def _save_metrics_to_meta_db(
@@ -204,8 +222,12 @@ class MetaKnowledgeService:
                 column_metrics.append(column_metric)
 
         # 指标本身和字段关系要放在同一笔事务里，避免只写入其中一部分
+        # 先删旧的字段依赖，避免指标口径调整后残留过期的关联关系
         async with self.meta_mysql_repository.session.begin():
-            self.meta_mysql_repository.save_metric_infos(metric_infos)
+            await self.meta_mysql_repository.delete_column_metrics_by_metric_ids(
+                [metric_info.id for metric_info in metric_infos]
+            )
+            await self.meta_mysql_repository.save_metric_infos(metric_infos)
             self.meta_mysql_repository.save_column_metrics(column_metrics)
 
         return metric_infos
@@ -219,7 +241,7 @@ class MetaKnowledgeService:
             # 和字段一样，一个指标也会拆成名字 描述 别名这几类语义入口
             points.append(
                 {
-                    "id": uuid.uuid4(),
+                    "id": make_point_id(metric_info.id, metric_info.name),
                     "embedding_text": metric_info.name,
                     "payload": asdict(metric_info),
                 }
@@ -227,7 +249,7 @@ class MetaKnowledgeService:
 
             points.append(
                 {
-                    "id": uuid.uuid4(),
+                    "id": make_point_id(metric_info.id, metric_info.description),
                     "embedding_text": metric_info.description,
                     "payload": asdict(metric_info),
                 }
@@ -236,7 +258,7 @@ class MetaKnowledgeService:
             for alia in metric_info.alias:
                 points.append(
                     {
-                        "id": uuid.uuid4(),
+                        "id": make_point_id(metric_info.id, alia),
                         "embedding_text": alia,
                         "payload": asdict(metric_info),
                     }
@@ -257,10 +279,26 @@ class MetaKnowledgeService:
         ids = [point["id"] for point in points]
         payloads = [point["payload"] for point in points]
 
+        # 先删除这些指标的旧向量点，再写入新点
+        await self.metric_qdrant_repository.delete_by_entity_ids(
+            [metric_info.id for metric_info in metric_infos]
+        )
         await self.metric_qdrant_repository.upsert(ids, embeddings, payloads)
 
-    async def build(self, config_path: Path):
+    async def reset(self):
+        """清空 Meta MySQL 四张元数据表 两个 Qdrant 集合和 ES 取值索引"""
+        async with self.meta_mysql_repository.session.begin():
+            await self.meta_mysql_repository.delete_all()
+        await self.column_qdrant_repository.delete_collection()
+        await self.metric_qdrant_repository.delete_collection()
+        await self.value_es_repository.delete_index()
+        logger.info("已清空元数据知识库")
+
+    async def build(self, config_path: Path, reset: bool = False):
         """读取配置并依次构建 Meta MySQL Qdrant 和 ES 中的元数据索引"""
+        if reset:
+            await self.reset()
+
         context = OmegaConf.load(config_path)
         schema = OmegaConf.structured(MetaConfig)
         meta_config: MetaConfig = OmegaConf.to_object(OmegaConf.merge(schema, context))

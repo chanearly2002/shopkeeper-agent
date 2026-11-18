@@ -33,11 +33,16 @@ function makeId() {
 }
 
 function upsertStep(steps: StepState[] = [], event: Extract<AgentEvent, { type: "progress" }>) {
+  const previous = steps.find((item) => item.step === event.step);
   const next = steps.filter((item) => item.step !== event.step);
   next.push({
     step: event.step,
     status: event.status,
     updatedAt: Date.now(),
+    // 同一步骤再次进入 running 说明它在循环中被重复执行（例如 SQL 校验-修正）
+    runs: (previous?.runs ?? 0) + (event.status === "running" ? 1 : 0),
+    // 新一轮执行开始时清掉上一轮的说明
+    detail: event.status === "running" ? undefined : event.detail ?? previous?.detail,
   });
   return next;
 }
@@ -108,6 +113,11 @@ export default function App() {
               status: "done",
               content: summarizeResult(event.data),
               result: event.data,
+              resultMeta: {
+                sql: event.sql,
+                truncated: event.truncated,
+                maxRows: event.max_rows,
+              },
             };
           }
 

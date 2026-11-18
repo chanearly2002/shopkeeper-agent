@@ -14,6 +14,7 @@ from app.agent.context import DataAgentContext
 from app.agent.llm import llm
 from app.agent.state import DataAgentState
 from app.core.log import logger
+from app.core.sql_safety import clean_sql
 from app.prompt.prompt_loader import load_prompt
 
 
@@ -46,7 +47,7 @@ async def generate_sql(state: DataAgentState, runtime: Runtime[DataAgentContext]
         output_parser = StrOutputParser()
         chain = prompt | llm | output_parser
 
-        result = await chain.ainvoke(
+        raw_sql = await chain.ainvoke(
             {
                 # YAML 更适合放进提示词：保留嵌套结构 顺序和中文说明，方便模型理解表字段关系
                 "table_infos": yaml.dump(
@@ -60,9 +61,12 @@ async def generate_sql(state: DataAgentState, runtime: Runtime[DataAgentContext]
                 "query": query,
             }
         )
-        logger.info(f"生成的SQL：{result}")
+        # 模型偶尔仍会输出 ```sql 代码块或末尾分号，统一清洗成可执行的纯 SQL
+        sql = clean_sql(raw_sql)
+        logger.info(f"生成的SQL：{sql}")
         writer({"type": "progress", "step": step, "status": "success"})
-        return {"sql": result}
+        # 每次生成新 SQL 都重置修正计数
+        return {"sql": sql, "correct_attempts": 0}
 
     except Exception as e:
         logger.error(f"{step} failed: {e}")

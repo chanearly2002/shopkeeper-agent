@@ -5,6 +5,7 @@
 当前链路已经落地关键词抽取和多路召回，字段和指标走 Qdrant 向量检索，字段取值走 ES 全文检索
 整体流程先抽取用户问题关键词，再并行召回字段 字段取值和指标信息，
 随后合并召回结果 过滤候选表和指标 补充额外上下文，最后生成 校验 修正并执行 SQL
+其中校验和修正构成一个有次数上限的循环
 """
 
 import asyncio
@@ -79,13 +80,14 @@ graph_builder.add_edge("filter_metric", "add_extra_context")
 graph_builder.add_edge("add_extra_context", "generate_sql")
 graph_builder.add_edge("generate_sql", "validate_sql")
 
-# SQL 校验通过就直接执行，校验失败则先进入修正节点
+# SQL 校验通过就直接执行，校验失败则进入修正节点；
+# 修正后的 SQL 回到校验节点重新检查，修正次数用完时由 validate_sql 抛出异常结束
 graph_builder.add_conditional_edges(
     source="validate_sql",
     path=lambda state: "run_sql" if state["error"] is None else "correct_sql",
     path_map={"run_sql": "run_sql", "correct_sql": "correct_sql"},
 )
-graph_builder.add_edge("correct_sql", "run_sql")
+graph_builder.add_edge("correct_sql", "validate_sql")
 graph_builder.add_edge("run_sql", END)
 
 # 编译后的 graph 是对外使用的 Agent 执行入口

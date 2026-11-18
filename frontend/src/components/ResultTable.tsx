@@ -3,6 +3,7 @@
  * 将后端返回的结构化数据归一化为可滚动表格
  */
 import { Database, FileJson } from "lucide-react";
+import type { ResultMeta } from "../types/agent";
 
 function normalizeRows(data: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(data)) {
@@ -26,7 +27,7 @@ function formatCell(value: unknown) {
   return String(value);
 }
 
-export function ResultTable({ data }: { data: unknown }) {
+export function ResultTable({ data, meta }: { data: unknown; meta?: ResultMeta }) {
   const rows = normalizeRows(data);
   const columns = Array.from(
     rows.reduce((keys, row) => {
@@ -49,8 +50,21 @@ export function ResultTable({ data }: { data: unknown }) {
         <div className="flex items-center gap-2 text-xs text-ink/55">
           <FileJson className="h-3.5 w-3.5" aria-hidden="true" />
           {rows.length} 行
+          {meta?.truncated && (
+            <span className="border border-brass/40 bg-brass/15 px-1.5 py-0.5 text-ink/70">
+              已截断，仅显示前 {meta.maxRows ?? rows.length} 行
+            </span>
+          )}
         </div>
       </div>
+      {meta?.sql && (
+        <details className="border-b border-ink/10 px-4 py-2 text-xs text-ink/60">
+          <summary className="cursor-pointer select-none font-semibold">执行的 SQL</summary>
+          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all font-mono text-[12px] leading-5 text-ink/75">
+            {meta.sql}
+          </pre>
+        </details>
+      )}
       <div className="max-h-[360px] overflow-auto">
         <table className="min-w-full border-separate border-spacing-0 text-left text-sm">
           <thead className="sticky top-0 z-10 bg-[#efe6d8]">

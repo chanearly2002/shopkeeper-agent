@@ -27,6 +27,12 @@ qdrant:
   host: localhost
   port: 6333
   embedding_size: 1024
+  column_collection: column_info_collection
+  metric_collection: metric_info_collection
+  # 余弦相似度阈值（0~1），低于该值的字段/指标不进入候选
+  score_threshold: 0.6
+  # 每个检索词最多返回的 point 数
+  limit: 20
 
 embedding:
   host: localhost
@@ -36,9 +42,31 @@ embedding:
 es:
   host: localhost
   port: 9200
-  index_name: data_agent
+  index_name: value_index
+  # BM25 原始得分阈值，未归一化，和 Qdrant 的余弦阈值不是同一量纲，需按实际数据单独标定
+  # 在教学数仓上实测：正确命中最低 3.72（如“北京”命中“北京市”），完全匹配约 5.3~11
+  min_score: 2.0
+  # 每个检索词最多返回的取值数
+  limit: 20
 
 llm:
   model_name: Pro/zai-org/GLM-5.1
   api_key: ${oc.env:LLM_API_KEY}
   base_url: https://api.siliconflow.cn/v1
+
+agent:
+  # SQL 校验失败后最多修正几次，超过后结束本次查询并返回错误
+  max_correct_attempts: 2
+  # 单次查询最多返回给前端的行数，超出部分截断
+  max_result_rows: 1000
+  # 单条查询在 MySQL 中的最长执行时间（毫秒），0 表示不限制
+  max_execution_ms: 30000
+  # 注入给模型的“今天”。教学数仓只有 2025 年 Q1 的数据，固定到 2025-03-31
+  # 才能让“本月”“最近 7 天”等相对时间查出结果；设为 null 则使用真实当前日期
+  today: "2025-03-31"
+
+api:
+  # 允许跨域访问后端的前端地址；同域部署或走 Vite 代理时不需要
+  cors_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173

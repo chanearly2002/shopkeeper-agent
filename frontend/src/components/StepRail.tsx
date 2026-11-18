@@ -45,11 +45,13 @@ const connectors = [
   "M410 566 L410 624",
   "M410 670 L410 718",
   "M488 650 L586 650",
-  "M670 670 L670 696 L410 696 L410 718",
+  // 校正后的 SQL 回到校验节点重新检查
+  "M670 670 L670 696 L470 696 L470 676",
 ];
 
 const branchLabels = [
   { text: "有误", x: 530, y: 642 },
+  { text: "重新校验", x: 540, y: 714 },
   { text: "无误", x: 366, y: 704 },
 ];
 
@@ -58,10 +60,6 @@ function getStatusMap(steps: StepState[]) {
     map[item.step] = item;
     return map;
   }, {});
-}
-
-function statusFor(step: string, map: Record<string, StepState>): FlowStatus {
-  return map[step]?.status ?? "pending";
 }
 
 function NodeIcon({ status }: { status: FlowStatus }) {
@@ -80,13 +78,16 @@ function NodeIcon({ status }: { status: FlowStatus }) {
   return <Circle className="h-3.5 w-3.5" aria-hidden="true" />;
 }
 
-function FlowNodeCard({ node, status }: { node: FlowNode; status: FlowStatus }) {
+function FlowNodeCard({ node, state }: { node: FlowNode; state?: StepState }) {
   const width = node.w ?? 156;
+  const status: FlowStatus = state?.status ?? "pending";
+  const runs = state?.runs ?? 0;
 
   return (
     <div
       className="absolute -translate-x-1/2"
       style={{ left: node.x, top: node.y, width }}
+      title={state?.detail}
     >
       <div
         className={cn(
@@ -109,6 +110,11 @@ function FlowNodeCard({ node, status }: { node: FlowNode; status: FlowStatus }) 
           <NodeIcon status={status} />
         </span>
         <span className="min-w-0 flex-1 truncate">{node.step}</span>
+        {runs > 1 && (
+          <span className="shrink-0 text-xs font-medium text-ink/50" title={`执行了 ${runs} 次`}>
+            ×{runs}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -170,11 +176,7 @@ export function StepRail({ steps = [] }: { steps?: StepState[] }) {
           </svg>
 
           {nodes.map((node) => (
-            <FlowNodeCard
-              key={node.step}
-              node={node}
-              status={statusFor(node.step, statusMap)}
-            />
+            <FlowNodeCard key={node.step} node={node} state={statusMap[node.step]} />
           ))}
         </div>
       </div>

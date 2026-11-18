@@ -48,14 +48,22 @@ async def filter_table(state: DataAgentState, runtime: Runtime[DataAgentContext]
         )
         # 模型只负责选择，程序根据选择结果从原始 TableInfoState 中裁剪，避免模型重写复杂结构出错
         filtered_table_infos: list[TableInfoState] = []
+        # 构造新的表结构而不是原地修改 state 里的对象，避免影响其他节点读到的数据
         for table_info in table_infos:
             if table_info["name"] in result:
-                table_info["columns"] = [
-                    column_info
-                    for column_info in table_info["columns"]
-                    if column_info["name"] in result[table_info["name"]]
-                ]
-                filtered_table_infos.append(table_info)
+                selected_columns = result[table_info["name"]]
+                filtered_table_infos.append(
+                    TableInfoState(
+                        name=table_info["name"],
+                        role=table_info["role"],
+                        description=table_info["description"],
+                        columns=[
+                            column_info
+                            for column_info in table_info["columns"]
+                            if column_info["name"] in selected_columns
+                        ],
+                    )
+                )
 
         logger.info(
             f"过滤后的表信息：{[filtered_table_info['name'] for filtered_table_info in filtered_table_infos]}"
