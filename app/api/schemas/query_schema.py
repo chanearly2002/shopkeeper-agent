@@ -7,7 +7,7 @@
 
 from datetime import date
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class QuerySchema(BaseModel):
@@ -17,3 +17,7 @@ class QuerySchema(BaseModel):
     query: str
     # 可选：指定本次查询的“今天”（YYYY-MM-DD），用于复现相对时间问题；不传则用配置
     today: date | None = None
+    # 可选：会话 id。同一会话里的追问会结合上文理解；不传则新建会话，id 在第一条 SSE 事件中返回
+    thread_id: str | None = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$"
+    )
