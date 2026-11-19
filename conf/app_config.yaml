@@ -55,9 +55,22 @@ llm:
   api_key: ${oc.env:LLM_API_KEY}
   base_url: https://api.siliconflow.cn/v1
 
+knowledge:
+  # 业务术语和已验证问答示例各自的 Qdrant 集合
+  term_collection: term_collection
+  example_collection: sql_example_collection
+  # 是否召回已验证问答示例作为 few-shot；评测时可以关掉做消融对比
+  enable_examples: true
+  # 最多召回几条示例，以及问题相似度阈值（余弦）
+  example_top_k: 3
+  example_score_threshold: 0.75
+
 agent:
   # SQL 校验失败后最多修正几次，超过后结束本次查询并返回错误
   max_correct_attempts: 2
+  # SQL 能执行后，是否再按外键 ref 关系做语义检查（扇出聚合、关联条件不符合 ref）；
+  # 发现问题会交给 correct_sql 修正，修正次数用完时只告警、不阻断
+  semantic_check: true
   # 单次查询最多返回给前端的行数，超出部分截断
   max_result_rows: 1000
   # 单条查询在 MySQL 中的最长执行时间（毫秒），0 表示不限制

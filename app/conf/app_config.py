@@ -95,10 +95,22 @@ class LLMConfig:
 
 
 @dataclass
+class KnowledgeConfig:
+    """业务术语与已验证问答示例配置"""
+
+    term_collection: str
+    example_collection: str
+    enable_examples: bool
+    example_top_k: int
+    example_score_threshold: float
+
+
+@dataclass
 class AgentConfig:
     """问数智能体运行参数"""
 
     max_correct_attempts: int
+    semantic_check: bool
     max_result_rows: int
     max_execution_ms: int
     # 形如 2025-12-31；为 None 时使用真实当前日期
@@ -123,6 +135,7 @@ class AppConfig:
     embedding: EmbeddingConfig
     es: ESConfig
     llm: LLMConfig
+    knowledge: KnowledgeConfig
     agent: AgentConfig
     api: ApiConfig
 

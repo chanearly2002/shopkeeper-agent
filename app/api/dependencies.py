@@ -24,6 +24,10 @@ from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
 from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepository
 from app.repositories.qdrant.column_qdrant_repository import ColumnQdrantRepository
 from app.repositories.qdrant.metric_qdrant_repository import MetricQdrantRepository
+from app.repositories.qdrant.sql_example_qdrant_repository import (
+    SqlExampleQdrantRepository,
+)
+from app.repositories.qdrant.term_qdrant_repository import TermQdrantRepository
 from app.services.query_service import QueryService
 
 
@@ -82,6 +86,18 @@ async def get_value_es_repository() -> ValueESRepository:
     return ValueESRepository(es_client_manager.client)
 
 
+async def get_term_qdrant_repository() -> TermQdrantRepository:
+    """创建业务术语仓储"""
+
+    return TermQdrantRepository(qdrant_client_manager.client)
+
+
+async def get_sql_example_qdrant_repository() -> SqlExampleQdrantRepository:
+    """创建已验证问答示例仓储"""
+
+    return SqlExampleQdrantRepository(qdrant_client_manager.client)
+
+
 async def get_query_service(
     meta_mysql_repository: Annotated[
         MetaMySQLRepository, Depends(get_meta_mysql_repository)
@@ -97,6 +113,12 @@ async def get_query_service(
         MetricQdrantRepository, Depends(get_metric_qdrant_repository)
     ],
     value_es_repository: Annotated[ValueESRepository, Depends(get_value_es_repository)],
+    term_qdrant_repository: Annotated[
+        TermQdrantRepository, Depends(get_term_qdrant_repository)
+    ],
+    sql_example_qdrant_repository: Annotated[
+        SqlExampleQdrantRepository, Depends(get_sql_example_qdrant_repository)
+    ],
 ) -> QueryService:
     """组装一次查询所需的业务服务"""
 
@@ -108,4 +130,6 @@ async def get_query_service(
         column_qdrant_repository=column_qdrant_repository,
         metric_qdrant_repository=metric_qdrant_repository,
         value_es_repository=value_es_repository,
+        term_qdrant_repository=term_qdrant_repository,
+        sql_example_qdrant_repository=sql_example_qdrant_repository,
     )

@@ -25,7 +25,13 @@ from sqlalchemy import text
 
 from app.clients.mysql_client_manager import dw_mysql_client_manager
 from evals.compare import results_equal
-from evals.dataset import DEFAULT_DATASET, check_structure, load_dataset
+from evals.dataset import (
+    DEFAULT_DATASET,
+    check_leakage,
+    check_structure,
+    load_dataset,
+    load_examples,
+)
 
 
 async def run_sql(session, sql: str) -> list[dict]:
@@ -108,9 +114,33 @@ def _preview(rows: list[dict]) -> str:
     return f"{len(rows)} 行"
 
 
+async def check_examples(examples: list[dict]) -> list[str]:
+    """few-shot 示例的 SQL 也必须能执行且有结果，否则会把错误写法教给模型"""
+    errors: list[str] = []
+    dw_mysql_client_manager.init()
+    try:
+        async with dw_mysql_client_manager.session_factory() as session:
+            for i, example in enumerate(examples, start=1):
+                try:
+                    rows = await run_sql(session, example["sql"])
+                except Exception as e:
+                    errors.append(f"第 {i} 条示例 SQL 执行失败：{e}")
+                    await session.rollback()
+                    continue
+                if not rows:
+                    errors.append(f"第 {i} 条示例 SQL 结果为空")
+    finally:
+        await dw_mysql_client_manager.close()
+    print(f"few-shot 示例 {len(examples)} 条，已在数仓上执行")
+    return errors
+
+
 async def main(path: Path, per_category: int | None) -> int:
     items = load_dataset(path)
     errors = check_structure(items, per_category)
+    examples = load_examples()
+    errors += check_leakage(items, examples)
+    errors += await check_examples(examples)
     result_errors, report = await check_results(items)
     errors += result_errors
 

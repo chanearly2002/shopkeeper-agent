@@ -5,7 +5,13 @@
 SQL 能通过只读校验。标准 SQL 与错误写法在数仓上的执行检查见 evals/check_dataset.py
 """
 
-from evals.dataset import DEFAULT_DATASET, check_structure, load_dataset
+from evals.dataset import (
+    DEFAULT_DATASET,
+    check_leakage,
+    check_structure,
+    load_dataset,
+    load_examples,
+)
 
 
 def test_trap_dataset_is_well_formed():
@@ -38,3 +44,18 @@ def test_check_structure_catches_problems():
     assert any("dim_user" in e for e in errors)
     assert any("不存在的指标" in e for e in errors)
     assert any("trap_sql 未通过只读校验" in e for e in errors)
+
+
+def test_examples_do_not_leak_into_eval_set():
+    assert check_leakage(load_dataset(DEFAULT_DATASET), load_examples()) == []
+
+
+def test_leakage_detected():
+    items = [
+        {
+            "id": "x",
+            "turns": [{"question": "2025 年的销售额是多少？", "gold_sql": "select 1"}],
+        }
+    ]
+    examples = [{"question": "2025年的销售额是多少", "sql": "select 2 from t"}]
+    assert check_leakage(items, examples)

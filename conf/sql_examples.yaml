@@ -1,0 +1,127 @@
+# 已验证问答示例（few-shot）
+#
+# 每条都是人工确认过口径、并在数仓上执行过的“问题 - SQL”对。问数时按问题相似度召回，
+# 作为 SQL 生成的参考写法；示例 SQL 用到的表会并入候选上下文
+# 参考 Vanna 的 question-SQL 训练数据、Databricks Genie 的 example SQL、Snowflake Cortex Analyst 的 verified queries
+#
+# 维护规则：
+#   - 示例覆盖的是“写法模式”（如何避免扇出、如何关联角色维度、转化率怎么写），
+#     年份 实体 问法要和评测集 evals/datasets/ 不同，避免评测分数虚高；
+#     evals/dataset.py 会检查两者的文本相似度
+#   - 修改后运行 uv run python -m evals.check_dataset 确认每条 SQL 都能执行且有结果，
+#     再重新构建知识库
+
+- question: 2024 年每个季度的支付金额是多少？
+  sql: |
+    select d.quarter as 季度, sum(o.order_amount) as 支付金额
+    from fact_order o
+    join dim_date d on o.pay_date_id = d.date_id
+    where o.pay_time is not null and d.year = 2024
+    group by d.quarter
+    order by d.quarter
+
+- question: 2024 年包含母婴商品的支付订单有多少笔，这些订单一共付了多少钱？
+  sql: |
+    select count(*) as 订单数, sum(o.order_amount) as 订单金额
+    from fact_order o
+    where o.pay_time is not null
+      and o.pay_date_id between 20240101 and 20241231
+      and exists (
+        select 1
+        from fact_order_item i
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where i.order_id = o.order_id and c.category_l1 = '母婴'
+      )
+
+- question: 2024 年服饰鞋包各个退款原因的成功退款金额
+  sql: |
+    select r.refund_reason as 退款原因, sum(r.refund_amount) as 退款金额
+    from fact_refund r
+    join fact_order_item i on r.order_item_id = i.order_item_id
+    join dim_sku k on i.sku_id = k.sku_id
+    join dim_category c on k.category_id = c.category_id
+    where r.refund_status = '退款成功'
+      and c.category_l1 = '服饰鞋包'
+      and r.apply_date_id between 20240101 and 20241231
+    group by r.refund_reason
+
+- question: 2024 年每个月扣除成功退款后的净成交额
+  sql: |
+    select d.month as 月份,
+           sum(o.order_amount) - coalesce(sum(r.refund_amount), 0) as 净成交额
+    from fact_order o
+    join dim_date d on o.pay_date_id = d.date_id
+    left join (
+      select order_id, sum(refund_amount) as refund_amount
+      from fact_refund
+      where refund_status = '退款成功'
+      group by order_id
+    ) r on r.order_id = o.order_id
+    where o.pay_time is not null and d.year = 2024
+    group by d.month
+
+- question: 2024 年常住地在新一线城市的用户，客单价是多少？
+  sql: |
+    select sum(o.order_amount) / count(distinct o.user_id) as 客单价
+    from fact_order o
+    join dim_user u on o.user_id = u.user_id
+    join dim_region r on u.region_id = r.region_id
+    where r.city_tier = '新一线'
+      and o.pay_time is not null
+      and o.pay_date_id between 20240101 and 20241231
+
+- question: 2024 年 6 月浏览过家用电器商品的人数
+  sql: |
+    select count(distinct b.user_id) as 浏览人数
+    from fact_user_behavior b
+    join dim_sku k on b.sku_id = k.sku_id
+    join dim_category c on k.category_id = c.category_id
+    where b.behavior_type = '浏览'
+      and c.category_l1 = '家用电器'
+      and b.date_id between 20240601 and 20240630
+
+- question: 2024 年各会员等级中，下过两笔及以上已支付订单的用户占比
+  sql: |
+    select u.member_level as 会员等级,
+           sum(case when t.cnt >= 2 then 1 else 0 end) / count(*) as 复购率
+    from (
+      select user_id, count(*) as cnt
+      from fact_order
+      where pay_time is not null
+        and pay_date_id between 20240101 and 20241231
+      group by user_id
+    ) t
+    join dim_user u on t.user_id = u.user_id
+    group by u.member_level
+
+- question: 2024 年 618 大促活动的商品，每个一级类目卖了多少件？
+  sql: |
+    select c.category_l1 as 一级类目, sum(i.quantity) as 件数
+    from fact_order_item i
+    join fact_order o on i.order_id = o.order_id
+    join dim_activity a on i.activity_id = a.activity_id
+    join dim_sku k on i.sku_id = k.sku_id
+    join dim_category c on k.category_id = c.category_id
+    where a.activity_name = '2024年618大促'
+      and o.pay_time is not null
+    group by c.category_l1
+
+- question: 2025 年第二季度的支付金额比第一季度增长了百分之多少？
+  sql: |
+    select (sum(case when d.quarter = 2 then o.order_amount end)
+            - sum(case when d.quarter = 1 then o.order_amount end))
+           / sum(case when d.quarter = 1 then o.order_amount end) as 环比增长率
+    from fact_order o
+    join dim_date d on o.pay_date_id = d.date_id
+    where o.pay_time is not null and d.year = 2025 and d.quarter in (1, 2)
+
+- question: 2024 年自营店铺和非自营店铺各有多少支付买家？
+  sql: |
+    select case when s.shop_type = '自营' then '自营' else '非自营' end as 店铺类别,
+           count(distinct o.user_id) as 支付买家数
+    from fact_order o
+    join dim_shop s on o.shop_id = s.shop_id
+    where o.pay_time is not null
+      and o.pay_date_id between 20240101 and 20241231
+    group by case when s.shop_type = '自营' then '自营' else '非自营' end

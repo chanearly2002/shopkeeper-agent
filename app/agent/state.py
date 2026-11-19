@@ -11,6 +11,8 @@ from typing import NotRequired, TypedDict
 
 from app.entities.column_info import ColumnInfo
 from app.entities.metric_info import MetricInfo
+from app.entities.sql_example import SqlExample
+from app.entities.term_info import TermInfo
 from app.entities.value_info import ValueInfo
 
 
@@ -66,10 +68,14 @@ class DataAgentState(TypedDict):
     """一次问数链路中的核心状态"""
 
     query: str  # 用户输入的查询
+    # 本次查询的“今天”（YYYY-MM-DD），不传则用 agent.today 配置；评测每题、多轮每个会话都可以单独指定
+    today: NotRequired[str]
     keywords: list[str]  # 抽取的关键词
     retrieved_column_infos: list[ColumnInfo]  # 检索到的字段信息
     retrieved_metric_infos: list[MetricInfo]  # 检索到的指标信息
     retrieved_value_infos: list[ValueInfo]  # 检索到的取值信息
+    term_infos: list[TermInfo]  # 命中的业务术语
+    example_infos: list[SqlExample]  # 召回的已验证问答示例
 
     table_infos: list[TableInfoState]  # 合并和补齐后的表结构上下文
     metric_infos: list[MetricInfoState]  # 合并后的指标上下文
@@ -80,6 +86,7 @@ class DataAgentState(TypedDict):
 
     error: str | None  # 校验SQL时出现的错误信息，None 表示校验通过
     correct_attempts: int  # 已经执行过的 SQL 修正次数，用来限制校验-修正循环
+    lint_issues: list[str]  # 最近一次语义检查发现的问题，修正次数用完仍存在时会保留下来
 
     result: list[dict]  # 最终查询结果，最多 agent.max_result_rows 行
     truncated: bool  # 结果是否因超过行数上限被截断

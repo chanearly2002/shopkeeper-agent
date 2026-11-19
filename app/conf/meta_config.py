@@ -6,7 +6,8 @@
 再把内容转换成这里定义的 dataclass 对象，后续服务层就可以按统一结构完成元数据同步
 """
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -53,6 +54,19 @@ class MetricConfig:
 
 
 @dataclass
+class TermConfig:
+    """
+    业务术语配置
+    definition 用自然语言写清口径，涉及的字段用 表名.字段名 写出，构建时会校验这些字段存在，
+    问数时命中术语会把这些字段补进候选上下文
+    """
+
+    name: str
+    definition: str
+    alias: list[str] = field(default_factory=list)
+
+
+@dataclass
 class MetaConfig:
     """
     元数据知识构建总配置
@@ -61,6 +75,16 @@ class MetaConfig:
 
     tables: Optional[list[TableConfig]] = None
     metrics: Optional[list[MetricConfig]] = None
+    terms: Optional[list[TermConfig]] = None
+
+
+# 术语定义里引用字段的写法：dim_xxx.col 或 fact_xxx.col
+COLUMN_REF_PATTERN = re.compile(r"\b((?:dim|fact)_\w+\.\w+)\b")
+
+
+def columns_in_text(text: str) -> list[str]:
+    """提取一段文字里以 表名.字段名 形式引用的字段，保持出现顺序并去重"""
+    return list(dict.fromkeys(COLUMN_REF_PATTERN.findall(text)))
 
 
 def validate_meta_config(meta_config: MetaConfig) -> list[str]:
@@ -93,4 +117,8 @@ def validate_meta_config(meta_config: MetaConfig) -> list[str]:
                     errors.append(
                         f"指标 {metric.name} 依赖的字段 {relevant_column} 不存在"
                     )
+        for term in meta_config.terms or []:
+            for column_id in columns_in_text(term.definition):
+                if column_id not in column_ids:
+                    errors.append(f"术语 {term.name} 引用的字段 {column_id} 不存在")
     return errors

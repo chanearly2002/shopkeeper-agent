@@ -17,6 +17,10 @@ from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
 from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepository
 from app.repositories.qdrant.column_qdrant_repository import ColumnQdrantRepository
 from app.repositories.qdrant.metric_qdrant_repository import MetricQdrantRepository
+from app.repositories.qdrant.sql_example_qdrant_repository import (
+    SqlExampleQdrantRepository,
+)
+from app.repositories.qdrant.term_qdrant_repository import TermQdrantRepository
 
 
 class DataAgentContext(TypedDict):
@@ -34,3 +38,6 @@ class DataAgentContext(TypedDict):
     meta_mysql_repository: MetaMySQLRepository
     # 数仓仓储，负责在额外上下文补全时读取数据库方言 版本等执行环境信息
     dw_mysql_repository: DWMySQLRepository
+    # 业务术语和已验证问答示例仓储，负责召回由人维护的确定性知识
+    term_qdrant_repository: TermQdrantRepository
+    sql_example_qdrant_repository: SqlExampleQdrantRepository

@@ -6,7 +6,9 @@ SQL 能否通过只读校验。不导入项目配置和数据库客户端，可�
 需要连数仓的有效性检查见 check_dataset.py
 """
 
+import re
 from collections import Counter
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import sqlglot
@@ -19,6 +21,12 @@ from app.core.sql_safety import ensure_readonly
 
 ROOT = Path(__file__).parents[1]
 DEFAULT_DATASET = ROOT / "evals" / "datasets" / "traps.yaml"
+EXAMPLES_FILE = ROOT / "conf" / "sql_examples.yaml"
+# 示例与评测题的问题文本相似度超过该值视为泄漏
+LEAKAGE_THRESHOLD = 0.8
+# SQL 的阈值更高：这个数仓里大量查询共用“明细→订单→商品→类目”这类关联，
+# 结构相似很正常，只拦截几乎相同、只换了过滤值的模板
+SQL_LEAKAGE_THRESHOLD = 0.9
 REQUIRED_TURN_FIELDS = (
     "question",
     "gold_sql",
@@ -88,4 +96,46 @@ def check_structure(items: list[dict], per_category: int | None) -> list[str]:
                     ensure_readonly(turn.get(key, ""))
                 except ValueError as e:
                     errors.append(f"{where}: {key} 未通过只读校验：{e}")
+    return errors
+
+
+def load_examples(path: Path = EXAMPLES_FILE) -> list[dict]:
+    """读取已验证问答示例（few-shot 示例库）"""
+    if not path.exists():
+        return []
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or []
+
+
+def _norm(text: str) -> str:
+    """去掉空白和标点后转小写，用于相似度比较"""
+    return re.sub(r"[\s，。？！、,.?!;；:：()（）]+", "", text).lower()
+
+
+def check_leakage(items: list[dict], examples: list[dict]) -> list[str]:
+    """
+    检查 few-shot 示例是否与评测题过于相似
+
+    示例会在问数时作为参考写法召回，如果和评测题几乎一样，评测分数就会虚高；
+    问题（含 paraphrases）和 SQL 都要比较
+    """
+    errors: list[str] = []
+    for item in items:
+        for turn in item.get("turns", []):
+            questions = [turn.get("question", ""), *turn.get("paraphrases", [])]
+            for i, example in enumerate(examples, start=1):
+                for q in questions:
+                    ratio = SequenceMatcher(
+                        None, _norm(q), _norm(example["question"])
+                    ).ratio()
+                    if ratio >= LEAKAGE_THRESHOLD:
+                        errors.append(
+                            f"{item['id']}: 问题与第 {i} 条示例过于相似（{ratio:.2f}）：{q} / {example['question']}"
+                        )
+                sql_ratio = SequenceMatcher(
+                    None, _norm(turn.get("gold_sql", "")), _norm(example["sql"])
+                ).ratio()
+                if sql_ratio >= SQL_LEAKAGE_THRESHOLD:
+                    errors.append(
+                        f"{item['id']}: 标准 SQL 与第 {i} 条示例 SQL 过于相似（{sql_ratio:.2f}）"
+                    )
     return errors
