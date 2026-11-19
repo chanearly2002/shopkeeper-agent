@@ -108,23 +108,34 @@ uv run python -m evals.runner --baseline evals/baseline.json   # 与基线比较
 
 ### 4.3 会话状态
 
+以下是已实现的版本（`app/agent/state.py`），与最初设想的差别见 4.9：
+
 ```python
+class ResultPreview(TypedDict):
+    columns: list[str]
+    row_count: int
+    truncated: bool
+    rows: list[dict]       # 前 5 行，值已转成基础类型
+
 class Turn(TypedDict):
     question: str          # 用户原话
     standalone: str        # 改写后的独立问题
-    intent: str            # new / followup / result_qa / clarify
+    intent: str            # new / followup / result_qa（clarify 留到第 5 步）
     sql: str | None
-    result_summary: str    # 列名 + 行数 + 前 5 行，给下一轮引用
+    result_preview: ResultPreview | None   # 给下一轮引用
+    error: str | None      # 失败的轮次也记录，下一轮仍能承接它的问题
     today: str
 
-class SessionState(TypedDict, total=False):
+class SessionState(TypedDict):
     user_input: str
-    today: str
+    today: NotRequired[str]
     history: Annotated[list[Turn], operator.add]   # reducer：每轮只追加
-    standalone: str
+    # 本轮数据，每轮完整覆盖
     intent: str
-    current_sql: str | None
-    current_result: list[dict]
+    standalone: str
+    sql: str | None
+    result_preview: ResultPreview | None
+    error: str | None
 ```
 
 ### 4.4 Checkpointer 选型
@@ -170,12 +181,46 @@ class SessionState(TypedDict, total=False):
 
 每一步都先跑单轮评测，确认单轮准确率没有下降。
 
+### 4.9 实施进度（步骤 1～3 已完成）
+
+**落地内容**
+
+| 步骤 | 文件 |
+| --- | --- |
+| 1 | `app/agent/session_graph.py`（`contextualize → run_pipeline → remember`，`InMemorySaver`）；节点 `app/agent/nodes/{contextualize,run_pipeline,remember}.py`；纯函数 `app/core/conversation.py`；Prompt `prompts/contextualize_question.prompt`（7 个 few-shot：省略、追加条件、换维度、引用结果、纠正口径、结果追问、新话题，统一用 2024 年，避开评测题）；配置 `conversation.history_turns` / `result_preview_rows` |
+| 2 | 接口 `thread_id`；SSE `session` / `rewrite` 事件；前端保存会话 id、“新会话”重置、回答顶部“我理解为：……”与“理解有误”（把改写放回输入框修改）、流程图新增“理解问题”节点；未知事件类型不再当作错误 |
+| 3 | `evals/datasets/multiturn.yaml`（20 段、44 轮，6 类追问）；`evals/multiturn.py` + `runner --multiturn teacher|free`；`summarize_dialogs` 等打分函数 |
+
+**与 4.2～4.7 设想的差别**
+
+- 意图暂时只有 `new` / `followup` / `result_qa`。`clarify` 要配合 interrupt，留到第 5 步；在那之前，模型遇到歧义时按业务术语的默认口径改写（与单轮行为一致）
+- `result_qa` 暂时也改写成可以独立查询的问题，重新查库（第 4 步再加 `answer_from_result`）；评测里这类轮次因此也用 `gold_sql` 判分
+- 结果摘要存成结构化的 `result_preview`（而不是一段文本），进 Prompt 时统一转 YAML；失败的轮次也写进历史（带 `error`），用户接着说“换成按月看”时仍能承接
+- 单轮图必须用 `compile(checkpointer=False)`：实测默认编译的图在节点里被调用时会继承外层 checkpointer，写出 `run_pipeline:<id>` 命名空间的检查点，正是 4.2 想避免的情况
+- 改写失败（输出不是 JSON）时不中断，按原话当新问题处理
+- 多轮评测的“改写准确率”没有单独跑一遍：现阶段单轮流水线只接收改写后的问题，“改写后单独走单轮流程”与本轮作答完全相同，轮次准确率就是改写准确率。第 4 步把上一轮 SQL 作为参考传进 `generate_sql` 后，两者才会分开，届时再加
+- 归因新增“意图错误”环节：意图判错且答错的轮次优先归到这里；报告的失败明细并列“预测改写 / 标准改写”，便于判断是改写错还是 SQL 错
+
+**已验证（没有 LLM API key、拿不到 bge 模型的环境）**
+
+用固定种子数仓 + 真实 Qdrant / ES / Meta MySQL，Embedding 用哈希向量代替，LLM 用“按评测集题目应答”的假模型（改写按 `gold_standalone`，生成按 `gold_sql`）：
+
+- 数据集：`check_dataset` 44 轮全部通过（标准 SQL 有结果，每轮错误写法都与标准答案不同）；单轮评测集仍全部通过
+- 打分自检：`--multiturn teacher --predictor gold` 100%，`--predictor trap` 0%；单轮 `--predictor gold` 仍为 100%
+- `agent` 模式：teacher / free 两种模式都跑通 20 段对话，首轮 6 次 LLM 调用、追问轮 7 次；故意把一轮意图判错后，该轮归为“意图错误”，报告列出意图混淆和改写对比
+- HTTP：同一 `thread_id` 连续三轮（列表 → “排第一的是哪个大区？” → “它每个月的销售额呢？”），事件顺序为 `session → progress… → rewrite → … → result`；非法 `thread_id` 返回 422
+- 检查点：只有根命名空间，单轮中间状态没有进检查点；失败轮次带 `error` 写进历史，下一轮正常承接；客户端中途断开后本轮不入历史，下一次请求从头开始
+- 前端：浏览器里连续追问，“理解问题”节点、改写横幅、“理解有误”回填、“新会话”清空会话 id 均正常
+- 单轮 runner 的 agent 模式行为不变（仍直接调用单轮图，每题 6 次 LLM 调用）
+
+**尚未验证**：真实模型的改写质量和多轮准确率。建议先跑 `--multiturn teacher`（看单轮追问能力和意图混淆），再跑 `--multiturn free`（看错误累积），两者都用 `--llm-cache` 录制以便复现。
+
 ---
 
 ## 五、后续路线（按投入产出排序）
 
 1. **用真实 LLM 跑基线和消融实验**（第三节），用数据决定下一步优化哪个环节
-2. **多轮问数**（第四节）
+2. **多轮问数**（第四节）：步骤 1～3 已完成，接下来是第 4 步（`followup` 带参考 SQL、`answer_from_result`）
 3. **指标半结构化**：在 `MetricConfig` 中增加 `expr`、`base_table`、`required_filter`（如支付金额必须 `pay_time IS NOT NULL`）。语义检查据此判断“用了支付金额却漏了支付过滤”，这是向 WrenAI 语义层迈出的第一步，代价远小于完整编译器
 4. **示例库飞轮**：前端点赞的问答经人工确认后写入 `sql_examples.yaml`，点踩的进入待审核评测题（借鉴 Vanna：只回灌验证过的样本）
 5. **行级权限**：用 sqlglot 在 AST 上强制加过滤条件（借鉴 SQLBot），安全规则不交给 Prompt
