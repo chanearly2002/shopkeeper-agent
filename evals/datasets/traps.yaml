@@ -1,0 +1,1572 @@
+# 业务口径陷阱评测集
+#
+# 10 类“SQL 语法正确、业务口径错误”的陷阱，每类 5 题，共 50 题
+# 陷阱分类见 docs/design/dw-schema-v2.md 第六节；口径以 conf/meta_config.yaml 的指标定义为准：
+#   - “销售额”默认指支付金额：fact_order.pay_time IS NOT NULL，按支付日期 pay_date_id 筛选时间
+#   - 按商品 类目 品牌 活动拆分金额时用 fact_order_item.pay_amount（不含运费）
+#   - 退款只认 refund_status = '退款成功'
+#
+# 字段说明：
+#   id          唯一标识，前缀是陷阱类别
+#   category    陷阱类别
+#   tags        用于按类别统计准确率
+#   difficulty  easy / medium / hard
+#   today       注入给模型的“今天”，保证相对时间可复现
+#   must_pass   核心场景，失败即视为回归
+#   turns       对话轮次；单轮题只有一轮
+#     question      用户问题
+#     paraphrases   同一标准 SQL 的其他问法
+#     gold_sql      标准 SQL，评测时与模型 SQL 比较执行结果
+#     trap_sql      该陷阱的典型错误写法；check_dataset 会确认它的结果与标准答案不同，
+#                   否则这道题测不出这个陷阱
+#     trap          错误写法错在哪里
+#     expect        回答本题需要的表 / 指标 / 取值，用于失败时归因到召回或过滤环节
+#     order_matters 标准 SQL 有 ORDER BY 且顺序是问题的一部分时为 true
+#
+# 修改数据生成器（app/scripts/dw_generator.py）后需要重新运行：
+#   uv run python -m evals.check_dataset
+
+# ---------------------------------------------------------------------------
+# 1. 下单与支付口径：销售额 / 订单数默认只算已支付订单，下单金额才包含未支付和已取消
+# ---------------------------------------------------------------------------
+- id: order_vs_pay_01
+  category: order_vs_pay
+  tags: [单表, 指标, 支付口径]
+  difficulty: easy
+  today: "2025-12-31"
+  must_pass: true
+  turns:
+    - question: 2025 年的销售额是多少？
+      paraphrases:
+        - 今年一共卖了多少钱
+      gold_sql: |
+        select sum(order_amount) as 销售额
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select sum(order_amount) as 销售额
+        from fact_order
+        where order_date_id between 20250101 and 20251231
+      trap: 没有排除未支付和已取消的订单，算成了下单金额
+      expect:
+        tables: [fact_order]
+        metrics: [支付金额]
+      order_matters: false
+
+- id: order_vs_pay_02
+  category: order_vs_pay
+  tags: [单表, 指标, 分组, 支付口径]
+  difficulty: easy
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年每个月的支付订单数是多少？
+      paraphrases:
+        - 今年各月成交了多少单
+      gold_sql: |
+        select d.month as 月份, count(*) as 支付订单数
+        from fact_order o
+        join dim_date d on o.pay_date_id = d.date_id
+        where o.pay_time is not null and d.year = 2025
+        group by d.month
+      trap_sql: |
+        select d.month as 月份, count(*) as 支付订单数
+        from fact_order o
+        join dim_date d on o.order_date_id = d.date_id
+        where d.year = 2025
+        group by d.month
+      trap: 统计了全部下单订单，包含已取消和待支付
+      expect:
+        tables: [fact_order, dim_date]
+        metrics: [支付订单数]
+      order_matters: false
+
+- id: order_vs_pay_03
+  category: order_vs_pay
+  tags: [单表, 指标, 多指标对比]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 6 月 1 日到 6 月 18 日下单的订单，下单金额和支付金额分别是多少？
+      paraphrases:
+        - 今年 618 期间下单的订单，拍下金额和实际支付金额各是多少
+      gold_sql: |
+        select sum(order_amount) as 下单金额,
+               sum(case when pay_time is not null then order_amount end) as 支付金额
+        from fact_order
+        where order_date_id between 20250601 and 20250618
+      trap_sql: |
+        select sum(order_amount) as 下单金额,
+               sum(order_amount) as 支付金额
+        from fact_order
+        where order_date_id between 20250601 and 20250618
+      trap: 把下单金额当成支付金额，没有区分两种口径
+      expect:
+        tables: [fact_order]
+        metrics: [下单金额, 支付金额]
+      order_matters: false
+
+- id: order_vs_pay_04
+  category: order_vs_pay
+  tags: [多表, 指标, 分组, 排序, 支付口径]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年各类型店铺的销售额是多少？按销售额从高到低排列。
+      paraphrases:
+        - 今年自营、旗舰店、专卖店、专营店各卖了多少，从高到低排
+      gold_sql: |
+        select s.shop_type as 店铺类型, sum(o.order_amount) as 销售额
+        from fact_order o
+        join dim_shop s on o.shop_id = s.shop_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by s.shop_type
+        order by 销售额 desc
+      trap_sql: |
+        select s.shop_type as 店铺类型, sum(o.order_amount) as 销售额
+        from fact_order o
+        join dim_shop s on o.shop_id = s.shop_id
+        where o.order_date_id between 20250101 and 20251231
+        group by s.shop_type
+        order by 销售额 desc
+      trap: 没有限定已支付，把已取消、待支付的订单金额也算进销售额
+      expect:
+        tables: [fact_order, dim_shop]
+        metrics: [支付金额]
+        values: []
+      order_matters: true
+
+- id: order_vs_pay_05
+  category: order_vs_pay
+  tags: [单表, 状态]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年被取消的订单有多少笔，涉及金额多少？
+      paraphrases:
+        - 今年取消了多少单，取消的订单总金额是多少
+      gold_sql: |
+        select count(*) as 取消订单数, sum(order_amount) as 取消订单金额
+        from fact_order
+        where order_status = '已取消'
+          and order_date_id between 20250101 and 20251231
+      trap_sql: |
+        select count(*) as 取消订单数, sum(order_amount) as 取消订单金额
+        from fact_order
+        where pay_time is null
+          and order_date_id between 20250101 and 20251231
+      trap: 用“未支付”代替“已取消”，把待支付订单也算了进去
+      expect:
+        tables: [fact_order]
+        values: [已取消]
+      order_matters: false
+
+# ---------------------------------------------------------------------------
+# 2. 订单头与明细扇出：订单级金额与明细表关联后再求和会被重复计算
+# ---------------------------------------------------------------------------
+- id: fanout_01
+  category: fanout
+  tags: [多表, 雪花, 指标, 分组, 支付口径]
+  difficulty: medium
+  today: "2025-12-31"
+  must_pass: true
+  turns:
+    - question: 2025 年各一级类目的销售额是多少？
+      paraphrases:
+        - 今年每个大类卖了多少钱
+      gold_sql: |
+        select c.category_l1 as 一级类目, sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by c.category_l1
+      trap_sql: |
+        select c.category_l1 as 一级类目, sum(o.order_amount) as 销售额
+        from fact_order o
+        join fact_order_item i on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by c.category_l1
+      trap: 订单金额关联明细后求和，一笔多件商品的订单被重复计算
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku, dim_category]
+        metrics: [支付金额]
+      order_matters: false
+
+- id: fanout_02
+  category: fanout
+  tags: [多表, 存在性, 支付口径]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年包含活动商品的已支付订单，订单总金额是多少？
+      paraphrases:
+        - 今年有参与活动商品的支付订单，一共付了多少钱
+      gold_sql: |
+        select sum(o.order_amount) as 订单总金额
+        from fact_order o
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+          and exists (
+            select 1 from fact_order_item i
+            where i.order_id = o.order_id and i.activity_id is not null
+          )
+      trap_sql: |
+        select sum(o.order_amount) as 订单总金额
+        from fact_order o
+        join fact_order_item i on i.order_id = o.order_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+          and i.activity_id is not null
+      trap: 一笔订单里有多件活动商品时，订单金额被重复累加
+      expect:
+        tables: [fact_order, fact_order_item]
+        metrics: [支付金额]
+      order_matters: false
+
+- id: fanout_03
+  category: fanout
+  tags: [多表, 雪花, 指标, 平均值]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年购买了美妆个护商品的支付订单，平均每笔订单金额是多少？
+      paraphrases:
+        - 今年含美妆个护商品的订单笔单价是多少
+      gold_sql: |
+        select avg(o.order_amount) as 笔单价
+        from fact_order o
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+          and o.order_id in (
+            select i.order_id
+            from fact_order_item i
+            join dim_sku k on i.sku_id = k.sku_id
+            join dim_category c on k.category_id = c.category_id
+            where c.category_l1 = '美妆个护'
+          )
+      trap_sql: |
+        select avg(o.order_amount) as 笔单价
+        from fact_order o
+        join fact_order_item i on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+          and c.category_l1 = '美妆个护'
+      trap: 按明细行求平均，多件商品的订单权重被放大
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku, dim_category]
+        metrics: [笔单价]
+        values: [美妆个护]
+      order_matters: false
+
+- id: fanout_04
+  category: fanout
+  tags: [多表, 分组, 销量]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年各品牌卖出了多少件商品？
+      paraphrases:
+        - 今年每个品牌的销量是多少件
+      gold_sql: |
+        select k.brand_name as 品牌, sum(i.quantity) as 销量
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by k.brand_name
+      trap_sql: |
+        select k.brand_name as 品牌, sum(o.item_quantity) as 销量
+        from fact_order o
+        join fact_order_item i on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by k.brand_name
+      trap: 用订单级的总件数按明细关联后求和，件数被重复计算且被算到所有品牌上
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku]
+      order_matters: false
+
+- id: fanout_05
+  category: fanout
+  tags: [单表, 粒度, 平均值]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年平均每笔支付订单包含几件商品？
+      paraphrases:
+        - 今年每单平均买几件
+      gold_sql: |
+        select avg(item_quantity) as 平均件数
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select avg(i.quantity) as 平均件数
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 按明细行求平均，得到的是“每个 SKU 平均几件”而不是“每单平均几件”
+      expect:
+        tables: [fact_order]
+      order_matters: false
+
+# ---------------------------------------------------------------------------
+# 3. 退款扣减：只有“退款成功”才是实际发生的退款
+# ---------------------------------------------------------------------------
+- id: refund_01
+  category: refund
+  tags: [多表, 指标, 净额]
+  difficulty: hard
+  today: "2025-12-31"
+  must_pass: true
+  turns:
+    - question: 2025 年支付的订单，扣除退款成功的金额后，净销售额是多少？
+      paraphrases:
+        - 今年的净成交额是多少（支付金额减去成功退款）
+      gold_sql: |
+        select
+          (select sum(order_amount) from fact_order
+           where pay_time is not null and pay_date_id between 20250101 and 20251231)
+          -
+          (select coalesce(sum(r.refund_amount), 0)
+           from fact_refund r
+           join fact_order o on r.order_id = o.order_id
+           where r.refund_status = '退款成功'
+             and o.pay_date_id between 20250101 and 20251231) as 净销售额
+      trap_sql: |
+        select
+          (select sum(order_amount) from fact_order
+           where pay_time is not null and pay_date_id between 20250101 and 20251231)
+          -
+          (select coalesce(sum(r.refund_amount), 0)
+           from fact_refund r
+           join fact_order o on r.order_id = o.order_id
+           where o.pay_date_id between 20250101 and 20251231) as 净销售额
+      trap: 扣除了全部退款申请，包括被拒绝、已撤销和处理中的
+      expect:
+        tables: [fact_order, fact_refund]
+        metrics: [净支付金额]
+      order_matters: false
+
+- id: refund_02
+  category: refund
+  tags: [单表, 状态]
+  difficulty: easy
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年申请的退款中，实际退款成功的金额是多少？
+      paraphrases:
+        - 今年成功退了多少钱
+      gold_sql: |
+        select sum(refund_amount) as 退款成功金额
+        from fact_refund
+        where refund_status = '退款成功'
+          and apply_date_id between 20250101 and 20251231
+      trap_sql: |
+        select sum(refund_amount) as 退款成功金额
+        from fact_refund
+        where apply_date_id between 20250101 and 20251231
+      trap: 没有按退款状态筛选，把全部退款申请金额都算成了退款
+      expect:
+        tables: [fact_refund]
+        values: [退款成功]
+      order_matters: false
+
+- id: refund_03
+  category: refund
+  tags: [多表, 雪花, 指标, 比率]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年支付的订单中，各一级类目的退款率是多少？
+      paraphrases:
+        - 今年各大类商品的退款金额占支付金额的比例
+      gold_sql: |
+        select c.category_l1 as 一级类目,
+               sum(coalesce(r.refund_amount, 0)) / sum(i.pay_amount) as 退款率
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        left join (
+          select order_item_id, sum(refund_amount) as refund_amount
+          from fact_refund
+          where refund_status = '退款成功'
+          group by order_item_id
+        ) r on r.order_item_id = i.order_item_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by c.category_l1
+      trap_sql: |
+        select c.category_l1 as 一级类目,
+               sum(coalesce(r.refund_amount, 0)) / sum(i.pay_amount) as 退款率
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        left join (
+          select order_item_id, sum(refund_amount) as refund_amount
+          from fact_refund
+          group by order_item_id
+        ) r on r.order_item_id = i.order_item_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by c.category_l1
+      trap: 分子包含了未成功的退款申请
+      expect:
+        tables: [fact_order, fact_order_item, fact_refund, dim_sku, dim_category]
+        metrics: [退款率]
+      order_matters: false
+
+- id: refund_04
+  category: refund
+  tags: [单表, 状态]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年申请的退款中，被拒绝或者用户自己撤销的有多少单？
+      paraphrases:
+        - 今年最终没有退成的退款申请有几笔（拒绝或撤销）
+      gold_sql: |
+        select count(*) as 未退成退款单数
+        from fact_refund
+        where refund_status in ('已拒绝', '已撤销')
+          and apply_date_id between 20250101 and 20251231
+      trap_sql: |
+        select count(*) as 未退成退款单数
+        from fact_refund
+        where refund_status <> '退款成功'
+          and apply_date_id between 20250101 and 20251231
+      trap: 用“不是退款成功”代替“拒绝或撤销”，把仍在处理中的退款也算进去
+      expect:
+        tables: [fact_refund]
+        values: [已拒绝, 已撤销]
+      order_matters: false
+
+- id: refund_05
+  category: refund
+  tags: [多表, 指标, 净额, 排序, TopN]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年净销售额最高的 5 家店铺是哪些？净销售额是支付金额减去成功退款金额。
+      paraphrases:
+        - 今年扣除退款后卖得最好的 5 家店
+      gold_sql: |
+        select s.shop_name as 店铺, sum(o.order_amount) - coalesce(sum(r.refund_amount), 0) as 净销售额
+        from fact_order o
+        join dim_shop s on o.shop_id = s.shop_id
+        left join (
+          select order_id, sum(refund_amount) as refund_amount
+          from fact_refund
+          where refund_status = '退款成功'
+          group by order_id
+        ) r on r.order_id = o.order_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by s.shop_name
+        order by 净销售额 desc
+        limit 5
+      trap_sql: |
+        select s.shop_name as 店铺, sum(o.order_amount) as 净销售额
+        from fact_order o
+        join dim_shop s on o.shop_id = s.shop_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by s.shop_name
+        order by 净销售额 desc
+        limit 5
+      trap: 没有扣除退款
+      expect:
+        tables: [fact_order, fact_refund, dim_shop]
+        metrics: [净支付金额]
+      order_matters: true
+
+# ---------------------------------------------------------------------------
+# 4. 日期角色：同一张日期表被下单 支付 退款申请 行为等多个日期字段引用
+# ---------------------------------------------------------------------------
+- id: date_role_01
+  category: date_role
+  tags: [单表, 日期角色]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 11 月 11 日当天完成支付的订单有多少笔？
+      paraphrases:
+        - 今年双 11 当天付款的订单数
+      gold_sql: |
+        select count(*) as 支付订单数
+        from fact_order
+        where pay_date_id = 20251111
+      trap_sql: |
+        select count(*) as 支付订单数
+        from fact_order
+        where order_date_id = 20251111 and pay_time is not null
+      trap: 用下单日期代替支付日期，漏掉 10 号下单 11 号支付的，多算 11 号下单 12 号支付的
+      expect:
+        tables: [fact_order]
+        metrics: [支付订单数]
+      order_matters: false
+
+- id: date_role_02
+  category: date_role
+  tags: [多表, 日期角色, 状态]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 12 月申请的退款中，退款成功的金额是多少？
+      paraphrases:
+        - 这个月提交的退款申请，成功退了多少钱
+      gold_sql: |
+        select sum(refund_amount) as 退款成功金额
+        from fact_refund
+        where refund_status = '退款成功'
+          and apply_date_id between 20251201 and 20251231
+      trap_sql: |
+        select sum(r.refund_amount) as 退款成功金额
+        from fact_refund r
+        join fact_order o on r.order_id = o.order_id
+        where r.refund_status = '退款成功'
+          and o.pay_date_id between 20251201 and 20251231
+      trap: 按订单支付日期筛选，而不是按退款申请日期
+      expect:
+        tables: [fact_refund]
+        values: [退款成功]
+      order_matters: false
+
+- id: date_role_03
+  category: date_role
+  tags: [单表, 日期角色]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 11 月完成的退款（按退款完成时间），成功退款金额是多少？
+      paraphrases:
+        - 11 月份退款到账的金额是多少
+      gold_sql: |
+        select sum(refund_amount) as 退款成功金额
+        from fact_refund
+        where refund_status = '退款成功'
+          and finish_time >= '2025-11-01' and finish_time < '2025-12-01'
+      trap_sql: |
+        select sum(refund_amount) as 退款成功金额
+        from fact_refund
+        where refund_status = '退款成功'
+          and apply_date_id between 20251101 and 20251130
+      trap: 用退款申请日期代替退款完成时间，月初月末跨月处理的退款被归错月份
+      expect:
+        tables: [fact_refund]
+        values: [退款成功]
+      order_matters: false
+
+- id: date_role_04
+  category: date_role
+  tags: [单表, 日期角色, 用户]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年每个季度新注册了多少用户？
+      paraphrases:
+        - 今年各季度的新增注册用户数
+      gold_sql: |
+        select quarter(register_date) as 季度, count(*) as 新注册用户数
+        from dim_user
+        where register_date between '2025-01-01' and '2025-12-31'
+        group by quarter(register_date)
+      trap_sql: |
+        select d.quarter as 季度, count(distinct o.user_id) as 新注册用户数
+        from fact_order o
+        join dim_date d on o.order_date_id = d.date_id
+        where d.year = 2025
+        group by d.quarter
+      trap: 用下单日期统计用户，得到的是下单用户数而不是注册用户数
+      expect:
+        tables: [dim_user]
+      order_matters: false
+
+- id: date_role_05
+  category: date_role
+  tags: [单表, 日期角色]
+  difficulty: easy
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 12 月 31 日当天下单的订单有多少笔？
+      paraphrases:
+        - 今天下了多少单
+      gold_sql: |
+        select count(*) as 下单订单数
+        from fact_order
+        where order_date_id = 20251231
+      trap_sql: |
+        select count(*) as 下单订单数
+        from fact_order
+        where pay_date_id = 20251231
+      trap: 用支付日期代替下单日期，漏掉当天被取消和尚未支付的订单
+      expect:
+        tables: [fact_order]
+        metrics: [下单订单数]
+      order_matters: false
+
+# ---------------------------------------------------------------------------
+# 5. 地区角色：收货城市（fact_order.receiver_region_id）与用户常住城市（dim_user.region_id）
+# ---------------------------------------------------------------------------
+- id: region_role_01
+  category: region_role
+  tags: [多表, 地区角色]
+  difficulty: medium
+  today: "2025-12-31"
+  must_pass: true
+  turns:
+    - question: 2025 年发往上海市的支付订单有多少笔？
+      paraphrases:
+        - 今年收货地址在上海的成交订单数
+      gold_sql: |
+        select count(*) as 支付订单数
+        from fact_order o
+        join dim_region r on o.receiver_region_id = r.region_id
+        where r.city = '上海市'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select count(*) as 支付订单数
+        from fact_order o
+        join dim_user u on o.user_id = u.user_id
+        join dim_region r on u.region_id = r.region_id
+        where r.city = '上海市'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 按用户常住城市统计，而问题问的是收货城市
+      expect:
+        tables: [fact_order, dim_region]
+        values: [上海市]
+      order_matters: false
+
+- id: region_role_02
+  category: region_role
+  tags: [多表, 地区角色, 指标]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年常住在上海市的用户，一共支付了多少钱？
+      paraphrases:
+        - 今年上海用户的消费总额
+      gold_sql: |
+        select sum(o.order_amount) as 支付金额
+        from fact_order o
+        join dim_user u on o.user_id = u.user_id
+        join dim_region r on u.region_id = r.region_id
+        where r.city = '上海市'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select sum(o.order_amount) as 支付金额
+        from fact_order o
+        join dim_region r on o.receiver_region_id = r.region_id
+        where r.city = '上海市'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 按收货城市统计，而问题问的是用户常住城市
+      expect:
+        tables: [fact_order, dim_user, dim_region]
+        metrics: [支付金额]
+        values: [上海市]
+      order_matters: false
+
+- id: region_role_03
+  category: region_role
+  tags: [多表, 地区角色, 分组, 去重]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 按用户常住地所在大区统计，2025 年各大区有多少支付买家？
+      paraphrases:
+        - 今年各大区的购买人数（按用户所在地）
+      gold_sql: |
+        select r.area as 大区, count(distinct o.user_id) as 支付买家数
+        from fact_order o
+        join dim_user u on o.user_id = u.user_id
+        join dim_region r on u.region_id = r.region_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by r.area
+      trap_sql: |
+        select r.area as 大区, count(distinct o.user_id) as 支付买家数
+        from fact_order o
+        join dim_region r on o.receiver_region_id = r.region_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by r.area
+      trap: 按收货地所在大区统计，一个用户寄往多个大区时会被重复计入
+      expect:
+        tables: [fact_order, dim_user, dim_region]
+        metrics: [支付买家数]
+      order_matters: false
+
+- id: region_role_04
+  category: region_role
+  tags: [多表, 地区角色, 指标]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年收货地在一线城市的订单，支付金额是多少？
+      paraphrases:
+        - 今年寄往一线城市的订单卖了多少钱
+      gold_sql: |
+        select sum(o.order_amount) as 支付金额
+        from fact_order o
+        join dim_region r on o.receiver_region_id = r.region_id
+        where r.city_tier = '一线'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select sum(o.order_amount) as 支付金额
+        from fact_order o
+        join dim_user u on o.user_id = u.user_id
+        join dim_region r on u.region_id = r.region_id
+        where r.city_tier = '一线'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 按用户常住城市的等级统计，而问题问的是收货城市
+      expect:
+        tables: [fact_order, dim_region]
+        metrics: [支付金额]
+        values: [一线]
+      order_matters: false
+
+- id: region_role_05
+  category: region_role
+  tags: [多表, 地区角色, 自关联]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年有多少支付订单的收货城市和下单用户的常住城市不是同一个城市？
+      paraphrases:
+        - 今年寄往外地（非用户所在城市）的成交订单有多少
+      gold_sql: |
+        select count(*) as 异地订单数
+        from fact_order o
+        join dim_user u on o.user_id = u.user_id
+        where o.receiver_region_id <> u.region_id
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select count(*) as 异地订单数
+        from fact_order o
+        join dim_user u on o.user_id = u.user_id
+        join dim_region rr on o.receiver_region_id = rr.region_id
+        join dim_region ur on u.region_id = ur.region_id
+        where rr.area <> ur.area
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 比较的是大区而不是城市，同一大区内的异地订单被漏掉
+      expect:
+        tables: [fact_order, dim_user]
+      order_matters: false
+
+# ---------------------------------------------------------------------------
+# 6. 雪花关联与类目层级：商品经 dim_sku.category_id 关联三级类目；毛利要乘件数
+# ---------------------------------------------------------------------------
+- id: snowflake_01
+  category: snowflake
+  tags: [多表, 雪花, 指标, 毛利]
+  difficulty: hard
+  today: "2025-12-31"
+  must_pass: true
+  turns:
+    - question: 2025 年美妆个护类目的毛利是多少？
+      paraphrases:
+        - 今年美妆个护赚了多少毛利
+      gold_sql: |
+        select sum(i.pay_amount - k.cost_price * i.quantity) as 毛利
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where c.category_l1 = '美妆个护'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select sum(i.pay_amount - k.cost_price) as 毛利
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where c.category_l1 = '美妆个护'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 成本价是单件成本，没有乘以件数
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku, dim_category]
+        metrics: [毛利]
+        values: [美妆个护]
+      order_matters: false
+
+- id: snowflake_02
+  category: snowflake
+  tags: [多表, 雪花, 指标, 比率]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年手机数码类目的毛利率是多少？
+      paraphrases:
+        - 今年手机数码的毛利率
+      gold_sql: |
+        select sum(i.pay_amount - k.cost_price * i.quantity) / sum(i.pay_amount) as 毛利率
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where c.category_l1 = '手机数码'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select sum((k.list_price - k.cost_price) * i.quantity) / sum(k.list_price * i.quantity) as 毛利率
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where c.category_l1 = '手机数码'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 用标价代替实付金额计算，忽略了活动降价和优惠
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku, dim_category]
+        metrics: [毛利]
+        values: [手机数码]
+      order_matters: false
+
+- id: snowflake_03
+  category: snowflake
+  tags: [多表, 雪花, 类目层级, 销量]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年三级类目“手机”一共卖了多少台？
+      paraphrases:
+        - 今年手机（三级类目）的销量
+      gold_sql: |
+        select sum(i.quantity) as 销量
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where c.category_l3 = '手机'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select sum(i.quantity) as 销量
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        where k.sku_name like '%手机%'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 用商品名称模糊匹配代替类目，把“磁吸手机壳”等配件也算成了手机
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku, dim_category]
+        values: [手机]
+      order_matters: false
+
+- id: snowflake_04
+  category: snowflake
+  tags: [多表, 雪花, 指标, 分组]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年各一级类目的件单价是多少？
+      paraphrases:
+        - 今年每个大类平均每件卖多少钱
+      gold_sql: |
+        select c.category_l1 as 一级类目, sum(i.pay_amount) / sum(i.quantity) as 件单价
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by c.category_l1
+      trap_sql: |
+        select c.category_l1 as 一级类目, avg(i.unit_price) as 件单价
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by c.category_l1
+      trap: 对成交单价做简单平均，没有扣除优惠，也没有按件数加权
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku, dim_category]
+        metrics: [件单价]
+      order_matters: false
+
+- id: snowflake_05
+  category: snowflake
+  tags: [多表, 雪花, 品牌, 类目层级]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年小米品牌的耳机卖了多少钱？
+      paraphrases:
+        - 今年小米耳机的销售额
+      gold_sql: |
+        select sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where k.brand_name = '小米'
+          and c.category_l3 = '耳机'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        where k.brand_name = '小米'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 漏掉了类目条件，统计成了小米全部商品
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku, dim_category]
+        metrics: [支付金额]
+        values: [小米, 耳机]
+      order_matters: false
+
+# ---------------------------------------------------------------------------
+# 7. 去重计数：人数、订单数在关联明细后必须去重
+# ---------------------------------------------------------------------------
+- id: distinct_01
+  category: distinct
+  tags: [单表, 指标, 去重]
+  difficulty: easy
+  today: "2025-12-31"
+  must_pass: true
+  turns:
+    - question: 2025 年有多少个支付买家？
+      paraphrases:
+        - 今年有多少人买过东西
+      gold_sql: |
+        select count(distinct user_id) as 支付买家数
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select count(user_id) as 支付买家数
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20250101 and 20251231
+      trap: 没有去重，统计成了支付订单数
+      expect:
+        tables: [fact_order]
+        metrics: [支付买家数]
+      order_matters: false
+
+- id: distinct_02
+  category: distinct
+  tags: [多表, 指标, 去重, 分组]
+  difficulty: easy
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年各会员等级分别有多少支付买家？
+      paraphrases:
+        - 今年每个会员等级的购买人数
+      gold_sql: |
+        select u.member_level as 会员等级, count(distinct o.user_id) as 支付买家数
+        from fact_order o
+        join dim_user u on o.user_id = u.user_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by u.member_level
+      trap_sql: |
+        select u.member_level as 会员等级, count(*) as 支付买家数
+        from fact_order o
+        join dim_user u on o.user_id = u.user_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by u.member_level
+      trap: 没有去重，统计成了各等级的支付订单数
+      expect:
+        tables: [fact_order, dim_user]
+        metrics: [支付买家数]
+      order_matters: false
+
+- id: distinct_03
+  category: distinct
+  tags: [多表, 雪花, 去重]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年购买过手机数码商品的买家有多少人？
+      paraphrases:
+        - 今年买过数码产品的人数
+      gold_sql: |
+        select count(distinct o.user_id) as 买家数
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where c.category_l1 = '手机数码'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select count(*) as 买家数
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_category c on k.category_id = c.category_id
+        where c.category_l1 = '手机数码'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 按明细行计数，统计成了购买记录数
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku, dim_category]
+        metrics: [支付买家数]
+        values: [手机数码]
+      order_matters: false
+
+- id: distinct_04
+  category: distinct
+  tags: [单表, 行为, 去重]
+  difficulty: easy
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 12 月有多少用户浏览过商品？
+      paraphrases:
+        - 这个月的浏览用户数
+      gold_sql: |
+        select count(distinct user_id) as 浏览用户数
+        from fact_user_behavior
+        where behavior_type = '浏览'
+          and date_id between 20251201 and 20251231
+      trap_sql: |
+        select count(*) as 浏览用户数
+        from fact_user_behavior
+        where behavior_type = '浏览'
+          and date_id between 20251201 and 20251231
+      trap: 没有去重，统计成了浏览次数
+      expect:
+        tables: [fact_user_behavior]
+        values: [浏览]
+      order_matters: false
+
+- id: distinct_05
+  category: distinct
+  tags: [单表, 退款, 去重]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年有多少笔订单发生过成功退款？
+      paraphrases:
+        - 今年退款成功的订单数
+      gold_sql: |
+        select count(distinct order_id) as 退款订单数
+        from fact_refund
+        where refund_status = '退款成功'
+          and apply_date_id between 20250101 and 20251231
+      trap_sql: |
+        select count(*) as 退款订单数
+        from fact_refund
+        where refund_status = '退款成功'
+          and apply_date_id between 20250101 and 20251231
+      trap: 一笔订单可能有多个商品退款，按退款单计数会重复
+      expect:
+        tables: [fact_refund]
+        values: [退款成功]
+      order_matters: false
+
+# ---------------------------------------------------------------------------
+# 8. 活动归因：“活动商品”按 activity_id 归因，“活动期间”按日期范围筛选
+# ---------------------------------------------------------------------------
+- id: activity_01
+  category: activity
+  tags: [多表, 活动, 销量]
+  difficulty: medium
+  today: "2025-12-31"
+  must_pass: true
+  turns:
+    - question: 2025 年双 11 活动的商品一共卖了多少件？
+      paraphrases:
+        - 参加今年双 11 活动的商品销量
+      gold_sql: |
+        select sum(i.quantity) as 销量
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_activity a on i.activity_id = a.activity_id
+        where a.activity_name = '2025年双11'
+          and o.pay_time is not null
+      trap_sql: |
+        select sum(i.quantity) as 销量
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20251020 and 20251111
+      trap: 用活动期间代替活动归因，把期间内未参加活动的商品也算了进去
+      expect:
+        tables: [fact_order, fact_order_item, dim_activity]
+        values: [2025年双11]
+      order_matters: false
+
+- id: activity_02
+  category: activity
+  tags: [单表, 活动期间, 指标]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 618 大促期间（6 月 1 日至 6 月 18 日）全站的销售额是多少？
+      paraphrases:
+        - 今年 618 活动那段时间一共卖了多少钱
+      gold_sql: |
+        select sum(order_amount) as 销售额
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20250601 and 20250618
+      trap_sql: |
+        select sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_activity a on i.activity_id = a.activity_id
+        where a.activity_name = '2025年618大促'
+          and o.pay_time is not null
+      trap: 只统计了参加 618 活动的商品，问题问的是活动期间全站
+      expect:
+        tables: [fact_order]
+        metrics: [支付金额]
+      order_matters: false
+
+- id: activity_03
+  category: activity
+  tags: [多表, 活动, 分组]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年各种活动类型带来的商品销售额分别是多少？
+      paraphrases:
+        - 今年大促、满减、秒杀、直降、优惠券各带来多少销售额
+      gold_sql: |
+        select a.activity_type as 活动类型, sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_activity a on i.activity_id = a.activity_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by a.activity_type
+      trap_sql: |
+        select a.activity_type as 活动类型, sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        left join dim_activity a on i.activity_id = a.activity_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by a.activity_type
+      trap: 左关联把未参加活动的商品也放进结果，多出一个活动类型为空的分组
+      expect:
+        tables: [fact_order, fact_order_item, dim_activity]
+        metrics: [支付金额]
+      order_matters: false
+
+- id: activity_04
+  category: activity
+  tags: [多表, 活动, 去重]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年有多少笔支付订单使用了“日常满199减20”活动？
+      paraphrases:
+        - 今年参加满 199 减 20 的成交订单有几单
+      gold_sql: |
+        select count(distinct o.order_id) as 订单数
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_activity a on i.activity_id = a.activity_id
+        where a.activity_name = '日常满199减20'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap_sql: |
+        select count(*) as 订单数
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_activity a on i.activity_id = a.activity_id
+        where a.activity_name = '日常满199减20'
+          and o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+      trap: 活动按商品归因，一笔订单有多件参加活动的商品时被重复计数
+      expect:
+        tables: [fact_order, fact_order_item, dim_activity]
+        values: [日常满199减20]
+      order_matters: false
+
+- id: activity_05
+  category: activity
+  tags: [多表, 活动, 活动期间]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年双 12 期间（12 月 1 日至 12 日）支付的订单里，没有参加任何活动的商品卖了多少钱？
+      paraphrases:
+        - 今年双 12 那几天，非活动商品的销售额
+      gold_sql: |
+        select sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        where i.activity_id is null
+          and o.pay_time is not null
+          and o.pay_date_id between 20251201 and 20251212
+      trap_sql: |
+        select sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20251201 and 20251212
+      trap: 漏掉了“没有参加活动”的条件
+      expect:
+        tables: [fact_order, fact_order_item]
+        metrics: [支付金额]
+      order_matters: false
+
+# ---------------------------------------------------------------------------
+# 9. 相对时间：今天是 2025-12-31
+# ---------------------------------------------------------------------------
+- id: relative_time_01
+  category: relative_time
+  tags: [单表, 相对时间, 指标]
+  difficulty: easy
+  today: "2025-12-31"
+  must_pass: true
+  turns:
+    - question: 本月的销售额是多少？
+      paraphrases:
+        - 这个月卖了多少钱
+      gold_sql: |
+        select sum(order_amount) as 销售额
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20251201 and 20251231
+      trap_sql: |
+        select sum(order_amount) as 销售额
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20251202 and 20251231
+      trap: 把“本月”理解成最近 30 天
+      expect:
+        tables: [fact_order]
+        metrics: [支付金额]
+      order_matters: false
+
+- id: relative_time_02
+  category: relative_time
+  tags: [单表, 相对时间, 指标]
+  difficulty: easy
+  today: "2025-12-31"
+  turns:
+    - question: 上个月有多少笔支付订单？
+      paraphrases:
+        - 上月成交了多少单
+      gold_sql: |
+        select count(*) as 支付订单数
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20251101 and 20251130
+      trap_sql: |
+        select count(*) as 支付订单数
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20251201 and 20251231
+      trap: 把“上个月”算成了本月
+      expect:
+        tables: [fact_order]
+        metrics: [支付订单数]
+      order_matters: false
+
+- id: relative_time_03
+  category: relative_time
+  tags: [单表, 相对时间, 同比]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 今年和去年的销售额分别是多少？今年同比增长了多少？
+      paraphrases:
+        - 对比今年和去年的销售额，算一下同比增长率
+      gold_sql: |
+        select t.今年销售额, t.去年销售额,
+               (t.今年销售额 - t.去年销售额) / t.去年销售额 as 同比增长率
+        from (
+          select sum(case when pay_date_id between 20250101 and 20251231 then order_amount end) as 今年销售额,
+                 sum(case when pay_date_id between 20240101 and 20241231 then order_amount end) as 去年销售额
+          from fact_order
+          where pay_time is not null
+        ) t
+      trap_sql: |
+        select t.今年销售额, t.去年销售额,
+               (t.今年销售额 - t.去年销售额) / t.今年销售额 as 同比增长率
+        from (
+          select sum(case when pay_date_id between 20250101 and 20251231 then order_amount end) as 今年销售额,
+                 sum(case when pay_date_id between 20240101 and 20241231 then order_amount end) as 去年销售额
+          from fact_order
+          where pay_time is not null
+        ) t
+      trap: 同比增长率的分母应该是去年的值
+      expect:
+        tables: [fact_order]
+        metrics: [支付金额]
+      order_matters: false
+
+- id: relative_time_04
+  category: relative_time
+  tags: [单表, 相对时间, 分组]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 最近 7 天每天的销售额是多少？
+      paraphrases:
+        - 过去一周每天卖了多少钱
+      gold_sql: |
+        select pay_date_id as 日期, sum(order_amount) as 销售额
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20251225 and 20251231
+        group by pay_date_id
+      trap_sql: |
+        select pay_date_id as 日期, sum(order_amount) as 销售额
+        from fact_order
+        where pay_time is not null
+          and pay_date_id between 20251224 and 20251231
+        group by pay_date_id
+      trap: 时间窗口差一天，“最近 7 天”算成了 8 天
+      expect:
+        tables: [fact_order]
+        metrics: [支付金额]
+      order_matters: false
+
+- id: relative_time_05
+  category: relative_time
+  tags: [多表, 相对时间, 同比]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 今年第三季度的销售额和去年同期相比增长了多少？
+      paraphrases:
+        - 今年 Q3 销售额的同比增长率
+      gold_sql: |
+        select (sum(case when d.year = 2025 then o.order_amount end)
+                - sum(case when d.year = 2024 then o.order_amount end))
+               / sum(case when d.year = 2024 then o.order_amount end) as 同比增长率
+        from fact_order o
+        join dim_date d on o.pay_date_id = d.date_id
+        where o.pay_time is not null
+          and d.quarter = 3
+          and d.year in (2024, 2025)
+      trap_sql: |
+        select (sum(case when d.quarter = 3 then o.order_amount end)
+                - sum(case when d.quarter = 2 then o.order_amount end))
+               / sum(case when d.quarter = 2 then o.order_amount end) as 同比增长率
+        from fact_order o
+        join dim_date d on o.pay_date_id = d.date_id
+        where o.pay_time is not null
+          and d.year = 2025
+          and d.quarter in (2, 3)
+      trap: 把“去年同期”算成了上一季度（环比）
+      expect:
+        tables: [fact_order, dim_date]
+        metrics: [支付金额]
+      order_matters: false
+
+# ---------------------------------------------------------------------------
+# 10. 漏斗分母：转化率、复购率的分子分母要在同一时间范围、同一人群、同一计数单位
+# ---------------------------------------------------------------------------
+- id: funnel_01
+  category: funnel
+  tags: [多表, 指标, 转化率]
+  difficulty: medium
+  today: "2025-12-31"
+  must_pass: true
+  turns:
+    - question: 2025 年 12 月的浏览转化率是多少？
+      paraphrases:
+        - 这个月浏览用户里有多大比例下单付款了
+      gold_sql: |
+        select
+          (select count(distinct user_id) from fact_order
+           where pay_time is not null and pay_date_id between 20251201 and 20251231)
+          /
+          (select count(distinct user_id) from fact_user_behavior
+           where behavior_type = '浏览' and date_id between 20251201 and 20251231) as 浏览转化率
+      trap_sql: |
+        select
+          (select count(distinct user_id) from fact_order
+           where pay_time is not null and pay_date_id between 20251201 and 20251231)
+          /
+          (select count(*) from fact_user_behavior
+           where behavior_type = '浏览' and date_id between 20251201 and 20251231) as 浏览转化率
+      trap: 分母用了浏览次数而不是浏览用户数
+      expect:
+        tables: [fact_order, fact_user_behavior]
+        metrics: [浏览转化率]
+      order_matters: false
+
+- id: funnel_02
+  category: funnel
+  tags: [多表, 转化率, 人群]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 12 月加购过商品的用户中，当月完成支付的比例是多少？
+      paraphrases:
+        - 这个月加购用户的支付转化率
+      gold_sql: |
+        select count(distinct p.user_id) / count(distinct c.user_id) as 加购支付转化率
+        from (
+          select distinct user_id from fact_user_behavior
+          where behavior_type = '加购' and date_id between 20251201 and 20251231
+        ) c
+        left join (
+          select distinct user_id from fact_order
+          where pay_time is not null and pay_date_id between 20251201 and 20251231
+        ) p on p.user_id = c.user_id
+      trap_sql: |
+        select
+          (select count(distinct user_id) from fact_order
+           where pay_time is not null and pay_date_id between 20251201 and 20251231)
+          /
+          (select count(distinct user_id) from fact_user_behavior
+           where behavior_type = '加购' and date_id between 20251201 and 20251231) as 加购支付转化率
+      trap: 分子用了全部支付买家，没有限定在加购用户之内，比例可能超过 100%
+      expect:
+        tables: [fact_order, fact_user_behavior]
+        values: [加购]
+      order_matters: false
+
+- id: funnel_03
+  category: funnel
+  tags: [多表, 雪花, 转化率, 人群]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 11 月浏览过美妆个护商品的用户中，有多少比例在当月买了美妆个护商品？
+      paraphrases:
+        - 11 月美妆个护的浏览到购买转化率（按人）
+      gold_sql: |
+        select count(distinct buy.user_id) / count(distinct browse.user_id) as 转化率
+        from (
+          select distinct b.user_id
+          from fact_user_behavior b
+          join dim_sku k on b.sku_id = k.sku_id
+          join dim_category c on k.category_id = c.category_id
+          where b.behavior_type = '浏览' and c.category_l1 = '美妆个护'
+            and b.date_id between 20251101 and 20251130
+        ) browse
+        left join (
+          select distinct o.user_id
+          from fact_order_item i
+          join fact_order o on i.order_id = o.order_id
+          join dim_sku k on i.sku_id = k.sku_id
+          join dim_category c on k.category_id = c.category_id
+          where c.category_l1 = '美妆个护' and o.pay_time is not null
+            and o.pay_date_id between 20251101 and 20251130
+        ) buy on buy.user_id = browse.user_id
+      trap_sql: |
+        select count(distinct buy.user_id) / count(distinct browse.user_id) as 转化率
+        from (
+          select distinct b.user_id
+          from fact_user_behavior b
+          where b.behavior_type = '浏览'
+            and b.date_id between 20251101 and 20251130
+        ) browse
+        left join (
+          select distinct o.user_id
+          from fact_order_item i
+          join fact_order o on i.order_id = o.order_id
+          join dim_sku k on i.sku_id = k.sku_id
+          join dim_category c on k.category_id = c.category_id
+          where c.category_l1 = '美妆个护' and o.pay_time is not null
+            and o.pay_date_id between 20251101 and 20251130
+        ) buy on buy.user_id = browse.user_id
+      trap: 分母用了全部浏览用户，没有限定浏览的是美妆个护商品
+      expect:
+        tables: [fact_order, fact_order_item, fact_user_behavior, dim_sku, dim_category]
+        values: [美妆个护, 浏览]
+      order_matters: false
+
+- id: funnel_04
+  category: funnel
+  tags: [单表, 指标, 复购率]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 11 月的复购率是多少？
+      paraphrases:
+        - 11 月份买了两次及以上的用户占比
+      gold_sql: |
+        select sum(case when cnt >= 2 then 1 else 0 end) / count(*) as 复购率
+        from (
+          select user_id, count(*) as cnt
+          from fact_order
+          where pay_time is not null
+            and pay_date_id between 20251101 and 20251130
+          group by user_id
+        ) t
+      trap_sql: |
+        select sum(case when cnt >= 2 then 1 else 0 end) / count(*) as 复购率
+        from (
+          select user_id, count(*) as cnt
+          from fact_order
+          where order_date_id between 20251101 and 20251130
+          group by user_id
+        ) t
+      trap: 按下单统计，已取消和未支付的订单也算作一次购买
+      expect:
+        tables: [fact_order]
+        metrics: [复购率]
+      order_matters: false
+
+- id: funnel_05
+  category: funnel
+  tags: [多表, 转化率, 分组, 渠道]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 12 月各终端的浏览转化率分别是多少？用该终端的支付买家数除以该终端的浏览用户数。
+      paraphrases:
+        - 这个月 APP、小程序、PC、H5 各自的浏览转化率
+      gold_sql: |
+        select v.platform as 终端, coalesce(p.buyers, 0) / v.visitors as 浏览转化率
+        from (
+          select platform, count(distinct user_id) as visitors
+          from fact_user_behavior
+          where behavior_type = '浏览' and date_id between 20251201 and 20251231
+          group by platform
+        ) v
+        left join (
+          select platform, count(distinct user_id) as buyers
+          from fact_order
+          where pay_time is not null and pay_date_id between 20251201 and 20251231
+          group by platform
+        ) p on p.platform = v.platform
+      trap_sql: |
+        select p.platform as 终端,
+               p.buyers / (select count(distinct user_id) from fact_user_behavior
+                           where behavior_type = '浏览' and date_id between 20251201 and 20251231) as 浏览转化率
+        from (
+          select platform, count(distinct user_id) as buyers
+          from fact_order
+          where pay_time is not null and pay_date_id between 20251201 and 20251231
+          group by platform
+        ) p
+      trap: 分母用了全站浏览用户数，没有按终端拆分
+      expect:
+        tables: [fact_order, fact_user_behavior]
+        metrics: [浏览转化率]
+      order_matters: false

@@ -10,7 +10,7 @@
 - 前端：React 19 + Vite + Tailwind CSS 3 + TypeScript，依赖用 `pnpm` 管理（位于 `frontend/`）
 - 基础设施（`docker/docker-compose.yaml`）：MySQL 8（`meta` 元数据库 + `dw` 教学数仓）、Qdrant、Elasticsearch 8.19 + IK 分词、Kibana、TEI Embedding（`bge-large-zh-v1.5`，1024 维）
 - 本仓库基于 `didilili/shopkeeper-agent` 二次开发，只有 `main` 分支；上游的教程章节分支不在这里
-- 只有少量单元测试（`tests/`），没有 CI 和评测集；代码注释、日志、Prompt、前端文案全部是中文
+- 有单元测试（`tests/`）和业务口径陷阱评测集（`evals/`，50 题），还没有评测 runner 和 CI；代码注释、日志、Prompt、前端文案全部是中文
 - 后续改进方向（评测体系、多轮问数）的设计方案见 `docs/design/eval-and-multiturn.md`
 
 ## 常用命令
@@ -27,7 +27,8 @@ uv run fastapi dev main.py                     # 启动后端，POST http://127.
 
 uv run ruff check --fix .                      # lint（规则 E/F/I，忽略 E501）
 uv run ruff format .                           # 格式化（行宽 88）
-uv run pytest                                  # 单元测试（不依赖外部服务）
+uv run pytest                                  # 单元测试（不依赖外部服务，含评测集静态检查）
+uv run python -m evals.check_dataset           # 在数仓上校验评测题：标准 SQL 有结果、错误写法结果不同（需 MySQL）
 
 # 单独调试
 uv run python -m app.agent.graph               # 不经 HTTP 跑一遍完整问数图（问题写死在文件末尾）
@@ -157,9 +158,19 @@ extract_keywords ─┬─ recall_column ─┐
 - **新增图节点**：`app/agent/nodes/<node>.py` → `graph.py` 注册节点和边 → 需要的新状态加到 `state.py` → 新外部依赖加到 `context.py`、`api/dependencies.py`、`services/query_service.py`，以及 `graph.py` 末尾的本地调试代码 → `StepRail.tsx` 的 `nodes` / `connectors` 加上同名步骤（否则前端不显示该步骤）。要在 `run_sql` 之后接节点（总结、图表等），直接读 `state["result"]`
 - **新增 SSE 事件类型**：节点里 `writer({...})` → `frontend/src/types/agent.ts` 的 `AgentEvent` → `App.tsx` 的 `onEvent`（当前非 progress/result 的事件都会被当作 error 处理）
 - **数仓加表/字段/指标**：改 `docker/mysql/dw.sql` → 改 `app/scripts/dw_generator.py` 生成对应数据 → 改 `conf/meta_config.yaml`（外键加 `ref`）→ 跑 `generate_dw_data`（会按 dw.sql 重建表）→ 重跑知识库构建（删除了表或指标时加 `--reset`）→ `uv run pytest`
+- **新增评测题**：加到 `evals/datasets/traps.yaml`（字段说明见文件头）→ 每题必须有 `gold_sql` 和一条典型错误写法 `trap_sql` → `uv run python -m evals.check_dataset` 确认错误写法的结果与标准答案不同、保留两位小数后仍可区分 → `uv run pytest`（每类题数在 `tests/test_eval_dataset.py` 里固定为 5，增加题数时同步修改）
 - **新增配置项**：`conf/app_config.yaml` + `app/conf/app_config.py` 的 dataclass 两处同时改
 - **Meta 库加表/加列**：`docker/mysql/meta.sql` + `app/models/` + `app/entities/` + mapper + `MetaMySQLRepository`。没有迁移工具，`meta.sql` 只在 MySQL 卷首次初始化时执行，已有数据卷需要 `docker compose -f docker/docker-compose.yaml down -v` 重建或手动 `ALTER TABLE`（例如 `ref_column` 列：`ALTER TABLE meta.column_info ADD COLUMN ref_column VARCHAR(128)`）
 - **新增接口**：`app/api/routers/` 新建 router，在 `main.py` `include_router`
+
+## 评测集（`evals/`）
+
+- `evals/datasets/traps.yaml`：10 类业务口径陷阱 × 5 题（下单与支付口径、订单头/明细扇出、退款扣减、日期角色、地区角色、雪花关联、去重计数、活动归因、相对时间、漏斗分母），“今天”统一是 2025-12-31。每题有标准 SQL `gold_sql`、典型错误写法 `trap_sql` 及其说明、用于归因的 `expect`（表 / 指标 / 取值）
+- 题目口径以 `meta_config.yaml` 的指标定义为准：“销售额”= 支付金额（`pay_time IS NOT NULL`，按 `pay_date_id` 筛时间）；按商品/类目/品牌/活动拆分金额用明细 `pay_amount`；退款只认“退款成功”
+- `evals/compare.py`：结果等价判定（忽略列名和列顺序、允许多出列、数值相对误差 1e-9、接受预测值四舍五入到 1~4 位小数、比率列允许 ×100、只有 `order_matters` 才比较行顺序），`tests/test_compare.py` 覆盖每条规则
+- `evals/dataset.py`：不连库的静态检查（pytest 会跑）；`evals/check_dataset.py`：连数仓执行标准 SQL 和错误写法
+- 评测题依赖生成数据：**改了 `dw_generator.py` 或数据规模后必须重跑 `check_dataset`**，个别题的区分度可能因此消失（例如 `date_role_01` 只差 1 单）
+- 还没有评测 runner（用问数图答题并打分），设计见 `docs/design/eval-and-multiturn.md`
 
 ## 已知问题与陷阱
 
