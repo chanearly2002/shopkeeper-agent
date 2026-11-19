@@ -10,8 +10,8 @@
 - 前端：React 19 + Vite + Tailwind CSS 3 + TypeScript，依赖用 `pnpm` 管理（位于 `frontend/`）
 - 基础设施（`docker/docker-compose.yaml`）：MySQL 8（`meta` 元数据库 + `dw` 教学数仓）、Qdrant、Elasticsearch 8.19 + IK 分词、Kibana、TEI Embedding（`bge-large-zh-v1.5`，1024 维）
 - 本仓库基于 `didilili/shopkeeper-agent` 二次开发，只有 `main` 分支；上游的教程章节分支不在这里
-- 有单元测试（`tests/`）和业务口径陷阱评测集（`evals/`，50 题），还没有评测 runner 和 CI；代码注释、日志、Prompt、前端文案全部是中文
-- 后续改进方向（评测体系、多轮问数）的设计方案见 `docs/design/eval-and-multiturn.md`
+- 有单元测试（`tests/`）、业务口径陷阱评测集与评测 runner（`evals/`），还没有 CI；代码注释、日志、Prompt、前端文案全部是中文
+- 设计文档：`docs/design/dw-schema-v2.md`（数仓）、`eval-and-multiturn.md`（评测与多轮初版方案）、`borrowing-and-roadmap.md`（开源借鉴评估、多轮 checkpointer 方案、后续路线，**最新**）
 
 ## 常用命令
 
@@ -21,14 +21,15 @@ uv sync                                        # 安装依赖（会自动拉取 
 cp .env.example .env                           # 填入 LLM_API_KEY（必需，见下方“陷阱”）
 docker compose -f docker/docker-compose.yaml up -d
 uv run python -m app.scripts.generate_dw_data  # 重建 dw 的表并写入生成数据（固定种子，约 17 秒；--scale small 更快）
-uv run python -m app.scripts.build_meta_knowledge -c conf/meta_config.yaml   # 构建元数据知识库（幂等，可重复运行）
+uv run python -m app.scripts.build_meta_knowledge -c conf/meta_config.yaml   # 构建元数据知识库（幂等，可重复运行；同时写入业务术语和 conf/sql_examples.yaml 的示例）
 uv run python -m app.scripts.build_meta_knowledge -c conf/meta_config.yaml --reset  # 先清空全部知识库再构建
 uv run fastapi dev main.py                     # 启动后端，POST http://127.0.0.1:8000/api/query
 
 uv run ruff check --fix .                      # lint（规则 E/F/I，忽略 E501）
 uv run ruff format .                           # 格式化（行宽 88）
 uv run pytest                                  # 单元测试（不依赖外部服务，含评测集静态检查）
-uv run python -m evals.check_dataset           # 在数仓上校验评测题：标准 SQL 有结果、错误写法结果不同（需 MySQL）
+uv run python -m evals.check_dataset           # 在数仓上校验评测题与 few-shot 示例：标准 SQL 有结果、错误写法结果不同、示例无泄漏（需 MySQL）
+uv run python -m evals.runner                  # 问数 Agent 答题打分（需全部服务和 LLM）；--predictor gold/trap 自检打分逻辑，见 evals/runner.py 文件头
 
 # 单独调试
 uv run python -m app.agent.graph               # 不经 HTTP 跑一遍完整问数图（问题写死在文件末尾）
@@ -57,10 +58,11 @@ Embedding 模型需要先下载到挂载目录（已被 gitignore）：
 | 离线：元数据知识库构建 | `app/scripts/build_meta_knowledge.py` | `MetaKnowledgeService.build()` 读取 `conf/meta_config.yaml` |
 | 在线：自然语言问数 | `main.py` → `app/api/routers/query_router.py` | `QueryService.query()` 驱动 `app/agent/graph.py` |
 
-离线构建把 `meta_config.yaml` 里声明的表/字段/指标写入三处（构建前先用 `validate_meta_config` 检查：外键必须有 `ref` 且指向存在的字段、指标依赖的字段必须存在，不通过直接报错，不会清库）：
+离线构建把 `meta_config.yaml` 里声明的表/字段/指标/术语，以及 `conf/sql_examples.yaml` 的已验证问答示例写入三处（构建前先用 `validate_meta_config` 检查：外键必须有 `ref` 且指向存在的字段、指标依赖的字段必须存在，不通过直接报错，不会清库）：
 
 - **Meta MySQL**（`table_info` / `column_info` / `metric_info` / `column_metric`）：权威的结构化元数据。字段的 `type` 和 `examples`（10 个去重样例值，日期转 ISO 字符串、Decimal 转 float）是构建时从 DW 实查补齐的；外键的关联目标存在 `column_info.ref_column`（ORM 属性名 `ref`）
 - **Qdrant**：`column_info_collection`、`metric_info_collection`（名字来自配置）。每个字段/指标拆成多个 point（名称、描述、每个别名各一个），payload 是完整实体，point id 由 `实体 id + 文本` 经 uuid5 确定性生成
+- **Qdrant** `term_collection` / `sql_example_collection`：业务术语和已验证问答示例，都以配置文件为准整体替换（先删集合再写）；示例的 `tables` 是解析 SQL 得到的物理表
 - **Elasticsearch** `value_index`（名字来自配置）：只同步 `sync: true` 的字段的全部去重取值（跳过 NULL 和空串），`value` 用 `ik_max_word` 分词
 
 构建是幂等的：配置里出现的表/指标会整体替换——先删这些表的旧字段、这些指标的旧依赖、对应实体的旧向量点和旧取值，再写入。配置里**整张删掉**的表或指标不会被自动清理，需要 `--reset`。
@@ -84,9 +86,10 @@ api (router/schemas/dependencies/lifespan)
 ### 问数图（`app/agent/graph.py`）
 
 ```
-extract_keywords ─┬─ recall_column ─┐
-                  ├─ recall_value  ─┼─ merge_retrieved_info ─┬─ filter_table  ─┐
-                  └─ recall_metric ─┘                        └─ filter_metric ─┴─ add_extra_context
+extract_keywords ─┬─ recall_column    ─┐
+                  ├─ recall_value     ─┤
+                  ├─ recall_metric    ─┼─ merge_retrieved_info ─┬─ filter_table  ─┐
+                  └─ recall_knowledge ─┘                        └─ filter_metric ─┴─ add_extra_context
   ─ generate_sql ─ validate_sql ─┬─(error is None)─ run_sql ─ END
                     ▲            └─(有 error)─ correct_sql ─┐
                     └───────────────────────────────────────┘   修正次数用完时 validate_sql 抛异常结束
@@ -97,20 +100,23 @@ extract_keywords ─┬─ recall_column ─┐
 | `extract_keywords` | jieba TF-IDF + 词性过滤，并把原始问题也加入关键词 | 无 |
 | `recall_column` / `recall_metric` | LLM 扩展检索词 → 批量 Embedding → 并发查 Qdrant（余弦阈值、top N 来自配置）→ 按 id 去重 | LLM、TEI、Qdrant |
 | `recall_value` | LLM 扩展取值候选 → 并发 ES `match` 检索（BM25 `min_score` 来自配置）→ 按 id 去重 | LLM、ES |
-| `merge_retrieved_info` | 以 column_id 合并三路结果；补齐指标依赖字段、把命中取值并入 `examples`；用 `app/agent/join_path.py` 按外键 `ref` 关系图补上候选表之间缺失的中间表；为每张表补齐主外键；产出 `table_infos` / `metric_infos`（外键字段带 `ref`） | Meta MySQL |
+| `recall_knowledge` | 业务术语按名称/别名精确匹配（`scroll_all` 取全部术语）；按问题向量召回已验证问答示例（`knowledge.*` 配置，可关闭） | Qdrant、TEI |
+| `merge_retrieved_info` | 以 column_id 合并各路结果；补齐指标依赖字段、术语定义里引用的字段（`columns_in_text`）、把命中取值并入 `examples`、示例 SQL 用到的表；用 `app/agent/join_path.py` 按外键 `ref` 关系图补上候选表之间缺失的中间表；为每张表补齐主外键；产出 `table_infos` / `metric_infos`（外键字段带 `ref`） | Meta MySQL |
 | `filter_table` / `filter_metric` | LLM 只返回“保留哪些”（JSON），程序按名字裁剪出新结构 | LLM |
 | `add_extra_context` | 日期/星期/季度（季度是整数，和 `dim_date.quarter` 一致；`agent.today` 配置了就用它，否则用真实日期）+ 数据库方言/版本 | DW MySQL |
-| `generate_sql` | 上下文以 YAML 形式塞进 Prompt，`clean_sql` 清洗后写入 `sql`，并把 `correct_attempts` 置 0 | LLM |
-| `validate_sql` | 只读校验（sqlglot）+ `EXPLAIN`；失败时把数据库原始报错写进 `error` 并发 `status: error`；修正次数达到 `agent.max_correct_attempts` 时抛异常 | DW MySQL |
+| `generate_sql` | 上下文以 YAML 形式塞进 Prompt（含命中的术语和召回的示例），`clean_sql` 清洗后写入 `sql`，并把 `correct_attempts` 置 0 | LLM |
+| `validate_sql` | 只读校验（sqlglot）+ `EXPLAIN` + 语义检查（`app/core/sql_lint.py`：扇出聚合、关联条件不符合 `ref`，`agent.semantic_check` 开关）；问题写进 `error` 并发 `status: error`。EXPLAIN 失败且修正次数用完时抛异常；**只剩语义问题时不抛，告警后照常执行**，问题留在 `lint_issues` | DW MySQL、Meta MySQL |
 | `correct_sql` | 带完整上下文 + 报错做最小修正，覆盖 `sql`，`correct_attempts + 1`，然后回到 `validate_sql` | LLM |
 | `run_sql` | 只读校验后执行，最多 `agent.max_result_rows` 行、超时 `agent.max_execution_ms`；结果写回 `result` / `truncated` 并发 `result` 事件 | DW MySQL |
 
-一次查询约 6 次 LLM 调用（3 次检索词扩展、2 次过滤、1 次生成），每次修正再加 1 次。
+一次查询约 6 次 LLM 调用（3 次检索词扩展、2 次过滤、1 次生成），每次修正再加 1 次（`recall_knowledge` 不调 LLM）。
+
+`today`：State 里的 `today`（接口可选字段）优先，其次 `agent.today` 配置，最后真实日期。
 
 ### State 与 Context
 
 - `DataAgentState`（`app/agent/state.py`，TypedDict，**没有任何 reducer**）：节点间传递的业务数据。并行节点必须写互不相同的 key，否则 LangGraph 会报并发更新冲突；要让多个并行节点写同一个 key，需要给该字段加 `Annotated[..., reducer]`
-- `DataAgentContext`（`app/agent/context.py`）：仓储、Embedding 客户端等外部依赖，节点通过 `runtime.context[...]` 取用，不放进 State
+- `DataAgentContext`（`app/agent/context.py`）：仓储、Embedding 客户端等外部依赖，节点通过 `runtime.context[...]` 取用，不放进 State。组装统一走 `QueryService.from_sessions(meta_session, dw_session).build_context()`（调试入口和评测 runner 都用它），HTTP 接口走 `api/dependencies.py`
 - LLM 是 `app/agent/llm.py` 的模块级单例（`init_chat_model(model_provider="openai")`，`temperature=0`），节点直接 `import llm`，换 OpenAI 兼容平台只改 `conf/app_config.yaml` 的 `llm` 段
 
 ### SSE 协议（前后端契约）
@@ -145,6 +151,8 @@ extract_keywords ─┬─ recall_column ─┐
 - 日志统一 `from app.core.log import logger`（loguru，自动带 request_id），不要用 `print` 或标准库 `logging`
 - Prompt 放 `prompts/<name>.prompt`，用 `load_prompt("<name>")` 读取、`PromptTemplate` 渲染。模板里的字面量花括号要写成 `{{ }}`（见 `filter_table_info.prompt`）
 - `meta_config.yaml`：表描述写明粒度（一行代表什么）；外键必须写 `ref: 表名.字段名`；只对取值有限的文本字段开 `sync: true`；`tests/test_meta_config.py` 会检查它和 `dw.sql` 的表字段完全一致
+- 业务术语写在 `meta_config.yaml` 的 `terms`：定义里涉及的字段必须写成 `表名.字段名`（构建时校验存在，问数时补进候选）；只放必须靠业务约定才能确定的口径
+- 已验证问答示例写在 `conf/sql_examples.yaml`：每条都要在数仓上执行过；覆盖“写法模式”，年份、实体、问法要与评测题不同（`evals/dataset.py` 会做相似度检查）
 - 需要结构化输出的节点用 `JsonOutputParser`，Prompt 里明确“仅输出 JSON”；让 LLM 只做选择，结构裁剪由程序完成
 - 给 LLM 的结构化上下文一律 `yaml.dump(..., allow_unicode=True, sort_keys=False)`
 - 任何要在数仓上执行的 SQL 都必须经过 `app/core/sql_safety.py` 的 `ensure_readonly`（`DWMySQLRepository.validate/run` 已内置）；LLM 产出的 SQL 先过 `clean_sql`
@@ -159,6 +167,8 @@ extract_keywords ─┬─ recall_column ─┐
 - **新增 SSE 事件类型**：节点里 `writer({...})` → `frontend/src/types/agent.ts` 的 `AgentEvent` → `App.tsx` 的 `onEvent`（当前非 progress/result 的事件都会被当作 error 处理）
 - **数仓加表/字段/指标**：改 `docker/mysql/dw.sql` → 改 `app/scripts/dw_generator.py` 生成对应数据 → 改 `conf/meta_config.yaml`（外键加 `ref`）→ 跑 `generate_dw_data`（会按 dw.sql 重建表）→ 重跑知识库构建（删除了表或指标时加 `--reset`）→ `uv run pytest`
 - **新增评测题**：加到 `evals/datasets/traps.yaml`（字段说明见文件头）→ 每题必须有 `gold_sql` 和一条典型错误写法 `trap_sql` → `uv run python -m evals.check_dataset` 确认错误写法的结果与标准答案不同、保留两位小数后仍可区分 → `uv run pytest`（每类题数在 `tests/test_eval_dataset.py` 里固定为 5，增加题数时同步修改）
+- **新增业务术语 / 问答示例**：改 `meta_config.yaml` 的 `terms` 或 `conf/sql_examples.yaml` → `uv run python -m evals.check_dataset`（示例能执行、不泄漏）→ 重跑知识库构建
+- **新增语义检查规则**：`app/core/sql_lint.py` 加纯函数规则 → `tests/test_sql_lint.py` 必须保持“评测集全部标准 SQL 零误报”
 - **新增配置项**：`conf/app_config.yaml` + `app/conf/app_config.py` 的 dataclass 两处同时改
 - **Meta 库加表/加列**：`docker/mysql/meta.sql` + `app/models/` + `app/entities/` + mapper + `MetaMySQLRepository`。没有迁移工具，`meta.sql` 只在 MySQL 卷首次初始化时执行，已有数据卷需要 `docker compose -f docker/docker-compose.yaml down -v` 重建或手动 `ALTER TABLE`（例如 `ref_column` 列：`ALTER TABLE meta.column_info ADD COLUMN ref_column VARCHAR(128)`）
 - **新增接口**：`app/api/routers/` 新建 router，在 `main.py` `include_router`
@@ -170,7 +180,8 @@ extract_keywords ─┬─ recall_column ─┐
 - `evals/compare.py`：结果等价判定（忽略列名和列顺序、允许多出列、数值相对误差 1e-9、接受预测值四舍五入到 1~4 位小数、比率列允许 ×100、只有 `order_matters` 才比较行顺序），`tests/test_compare.py` 覆盖每条规则
 - `evals/dataset.py`：不连库的静态检查（pytest 会跑）；`evals/check_dataset.py`：连数仓执行标准 SQL 和错误写法
 - 评测题依赖生成数据：**改了 `dw_generator.py` 或数据规模后必须重跑 `check_dataset`**，个别题的区分度可能因此消失（例如 `date_role_01` 只差 1 单）
-- 还没有评测 runner（用问数图答题并打分），设计见 `docs/design/eval-and-multiturn.md`
+- `evals/runner.py`：答题打分。`--predictor agent` 用问数图答题，并通过 `graph.astream(stream_mode=["updates", "custom"])` 捕获每个节点的输出做归因（召回遗漏 → 过滤误删 → SQL 不可执行 → 结果不符，`evals/scoring.py`）；`gold` / `trap` 用标准 SQL / 错误写法作答，应分别为 100% / 0%，用来自检打分逻辑。支持 `--paraphrases`、`--no-examples`、`--no-semantic-check`、`--llm-cache`（`evals/llm_cache.py`，sqlite 录制回放）、`--baseline` / `--save-baseline`（退化时退出码 1）。报告在 `evals/reports/`（已 gitignore）
+- runner 暂只支持单轮题；多轮方案见 `docs/design/borrowing-and-roadmap.md` 第四节
 
 ## 已知问题与陷阱
 
@@ -183,7 +194,6 @@ extract_keywords ─┬─ recall_column ─┐
 **SQL 闭环**
 - `ensure_readonly` 基于 sqlglot 的 MySQL 方言解析，sqlglot 解析不了的合法 MySQL 语法会被当作“无法解析”拒绝，然后进入修正流程
 - 行数上限用 `fetchmany` 实现，asyncmy 默认缓冲整个结果集，超大结果仍会先完整读进内存；靠 `max_execution_ms` 兜底
-- `agent.today` 是全局配置，不是每次请求的参数；评测（每题指定日期）和多轮会话需要把它改为请求级
 
 **检索**
 - ES `min_score` 是 BM25 原始得分，2.0 是在教学数仓上实测标定的（正确命中最低约 3.8），数据量或取值分布变化后需要重新标定；共享词造成的噪声命中（“金卡会员”命中“普通会员”、“2025年”命中各活动名）得分也很高，阈值挡不住，只能靠过滤节点；Qdrant 余弦阈值 0.6 没有标定过（本地测试拿不到真实 bge 模型）
@@ -191,6 +201,8 @@ extract_keywords ─┬─ recall_column ─┐
 
 **其他**
 - `filter_table` / `filter_metric` / `recall_*` 用 `JsonOutputParser`，模型输出格式不对会直接抛异常中断整条流程，没有重试或降级
+- 语义检查只看同一层 SELECT 里直接出现的物理表，派生表 / CTE 里的扇出不会被发现；它是提示而非硬约束，修正次数用完仍会执行
+- 已验证问答示例会显著影响评测分数：衡量模型本身的能力时用 `--no-examples` 做对照；示例与评测题的相似度检查是文本层面的，不能完全排除“写法模式”层面的提示
 - 关联路径补全只在候选表“不连通”时才加表；若召回已经带进了经由维度表的关联（如同时召回了 `dim_shop` 和 `dim_sku`），是否扇出取决于模型按 `ref` 写 JOIN 的质量
 - 生成数据的用户只有 3000 个，人均订单多，浏览转化率、复购率明显高于真实业务，只适合检验 SQL 写法，不代表真实水平
 - 请求级 `AsyncSession` 不支持并发使用。目前并行的 `recall_*` 节点不碰 MySQL 所以没问题；新增会访问 MySQL 的并行节点时要注意

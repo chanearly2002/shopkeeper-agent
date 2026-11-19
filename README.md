@@ -32,6 +32,9 @@ shopkeeper-agent 的做法是**先检索、再生成、最后校验执行**：
 - **混合检索**：字段和指标用 Qdrant 做语义召回，字段取值用 Elasticsearch + IK 分词做全文召回，三路并行；召回结果再从 MySQL 补齐指标依赖字段和主外键。
 - **关联路径补全**：元数据中为每个外键声明关联目标（`ref`），系统据此找出候选表之间缺失的中间表，并让模型按 `ref` 编写 JOIN 条件，避免经由维度表关联造成的金额重复计算。
 - **分步推理**：检索词扩展、表字段过滤、指标过滤、SQL 生成各由独立节点完成。大模型只负责“选择”，上下文结构的裁剪由程序完成。
+- **SQL 语义检查**：EXPLAIN 之后再按外键关系检查“能执行但算错”的写法（如订单金额关联明细后重复计算），发现问题交给模型修正。
+- **业务术语与已验证示例**：术语表把“双11当天 / 双11期间 / 双11活动商品”这类说法映射到确定口径；已验证的问题-SQL 对按相似度召回作为参考写法。
+- **评测体系**：50 道业务口径陷阱题 + 答题打分 runner，按召回、过滤、生成环节归因，支持基线对比和消融实验。
 - **SQL 安全**：执行前用 sqlglot 做程序侧只读校验，只允许单条查询语句，拒绝写入、DDL、加锁和导出；查询有行数上限和执行超时。
 - **校验修正闭环**：先用 `EXPLAIN` 校验 SQL，失败时带着数据库报错交给大模型修正，再重新校验，修正次数有上限。
 - **指标口径统一**：下单金额、支付金额、客单价、退款率等 13 个指标的计算公式写在元数据配置里，生成 SQL 时严格遵循。
@@ -99,7 +102,7 @@ shopkeeper-agent/
 │   ├── repositories/     # MySQL、Qdrant、Elasticsearch 数据访问层
 │   ├── scripts/          # 示例数据生成、元数据知识库构建脚本
 │   └── services/         # 知识库构建服务、问数查询服务
-├── conf/                 # app_config.yaml（运行配置）、meta_config.yaml（元数据配置）
+├── conf/                 # app_config.yaml（运行配置）、meta_config.yaml（元数据与术语）、sql_examples.yaml（已验证示例）
 ├── docker/               # Docker Compose、MySQL 初始化 SQL、ES IK 插件
 ├── docs/                 # 架构图、截图、设计文档
 ├── evals/                # 评测集与结果判定
@@ -274,7 +277,8 @@ pnpm dev
 uv run ruff check --fix .   # 代码检查
 uv run ruff format .        # 格式化
 uv run pytest               # 单元测试
-uv run python -m evals.check_dataset   # 在数仓上校验评测集
+uv run python -m evals.check_dataset   # 在数仓上校验评测集与示例
+uv run python -m evals.runner          # 问数 Agent 答题打分（需要 LLM）
 cd frontend && pnpm lint    # 前端类型检查
 ```
 
@@ -283,10 +287,10 @@ cd frontend && pnpm lint    # 前端类型检查
 ## 当前限制与规划
 
 - **单轮问答**：暂不支持多轮追问和会话管理，每个问题独立处理。
-- **评测体系尚不完整**：已有 50 道业务口径陷阱评测题（`evals/datasets/traps.yaml`）和结果判定器，但还没有自动答题打分的 runner 和回归门禁。
+- **评测还缺真实模型的基线**：评测集、runner 和回归门禁已就绪，但尚未用真实 LLM 跑出基线数据；也还没有接入 CI。
 - **生产化能力**：权限控制、多租户、查询缓存、限流、监控告警等暂未涉及。
 
-评测体系和多轮问数的设计方案见 [docs/design/eval-and-multiturn.md](docs/design/eval-and-multiturn.md)。
+开源项目借鉴评估、多轮问数（基于 LangGraph checkpointer）方案和后续路线见 [docs/design/borrowing-and-roadmap.md](docs/design/borrowing-and-roadmap.md)。
 
 ## 致谢与许可证
 
