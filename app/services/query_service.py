@@ -9,6 +9,7 @@
 import json
 
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.context import DataAgentContext
 from app.agent.graph import graph
@@ -18,6 +19,10 @@ from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
 from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepository
 from app.repositories.qdrant.column_qdrant_repository import ColumnQdrantRepository
 from app.repositories.qdrant.metric_qdrant_repository import MetricQdrantRepository
+from app.repositories.qdrant.sql_example_qdrant_repository import (
+    SqlExampleQdrantRepository,
+)
+from app.repositories.qdrant.term_qdrant_repository import TermQdrantRepository
 
 
 class QueryService:
@@ -31,6 +36,8 @@ class QueryService:
         column_qdrant_repository: ColumnQdrantRepository,
         metric_qdrant_repository: MetricQdrantRepository,
         value_es_repository: ValueESRepository,
+        term_qdrant_repository: TermQdrantRepository,
+        sql_example_qdrant_repository: SqlExampleQdrantRepository,
     ):
         # MySQL 仓储分别负责元数据补全和真实数仓环境信息读取
         self.meta_mysql_repository = meta_mysql_repository
@@ -41,21 +48,54 @@ class QueryService:
         self.column_qdrant_repository = column_qdrant_repository
         self.metric_qdrant_repository = metric_qdrant_repository
         self.value_es_repository = value_es_repository
+        self.term_qdrant_repository = term_qdrant_repository
+        self.sql_example_qdrant_repository = sql_example_qdrant_repository
 
-    async def query(self, query: str):
-        """执行一次问数工作流，并逐段产出 SSE 消息"""
+    @classmethod
+    def from_sessions(cls, meta_session: AsyncSession, dw_session: AsyncSession):
+        """
+        用两个数据库 Session 和已初始化的全局客户端组装服务
 
-        # State 只放会被图节点读写和合并的业务数据，外部工具对象不塞进 State
-        state = DataAgentState(query=query)
-        # Context 保存本次图执行需要复用的外部依赖，节点通过 runtime.context 读取
-        context = DataAgentContext(
+        供本地调试和评测 runner 使用；HTTP 接口通过 api/dependencies.py 的依赖注入组装
+        """
+        from app.clients.embedding_client_manager import embedding_client_manager
+        from app.clients.es_client_manager import es_client_manager
+        from app.clients.qdrant_client_manager import qdrant_client_manager
+
+        qdrant = qdrant_client_manager.client
+        return cls(
+            meta_mysql_repository=MetaMySQLRepository(meta_session),
+            embedding_client=embedding_client_manager.client,
+            dw_mysql_repository=DWMySQLRepository(dw_session),
+            column_qdrant_repository=ColumnQdrantRepository(qdrant),
+            metric_qdrant_repository=MetricQdrantRepository(qdrant),
+            value_es_repository=ValueESRepository(es_client_manager.client),
+            term_qdrant_repository=TermQdrantRepository(qdrant),
+            sql_example_qdrant_repository=SqlExampleQdrantRepository(qdrant),
+        )
+
+    def build_context(self) -> DataAgentContext:
+        """组装图执行需要的外部依赖，节点通过 runtime.context 读取"""
+        return DataAgentContext(
             column_qdrant_repository=self.column_qdrant_repository,
             embedding_client=self.embedding_client,
             metric_qdrant_repository=self.metric_qdrant_repository,
             value_es_repository=self.value_es_repository,
             meta_mysql_repository=self.meta_mysql_repository,
             dw_mysql_repository=self.dw_mysql_repository,
+            term_qdrant_repository=self.term_qdrant_repository,
+            sql_example_qdrant_repository=self.sql_example_qdrant_repository,
         )
+
+    async def query(self, query: str, today: str | None = None):
+        """执行一次问数工作流，并逐段产出 SSE 消息"""
+
+        # State 只放会被图节点读写和合并的业务数据，外部工具对象不塞进 State
+        state = DataAgentState(query=query)
+        if today:
+            state["today"] = today
+        # Context 保存本次图执行需要复用的外部依赖，节点通过 runtime.context 读取
+        context = self.build_context()
         try:
             # stream_mode="custom" 对应节点内部 writer(...) 写出的进度消息
             async for chunk in graph.astream(

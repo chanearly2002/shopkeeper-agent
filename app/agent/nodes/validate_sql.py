@@ -1,7 +1,8 @@
 """
 SQL 校验节点
 
-负责在真正执行查询前检查生成的 SQL：先做程序侧只读检查，再交给数据库 EXPLAIN 解析
+负责在真正执行查询前检查生成的 SQL：先做程序侧只读检查，再交给数据库 EXPLAIN 解析，
+最后按外键 ref 关系做语义检查（扇出聚合、关联条件不符合 ref），发现问题同样交给 correct_sql 修正
 校验结果不在这里决定流程走向，而是通过 state["error"] 交给 graph.py 的条件边判断：
 通过则执行，不通过且修正次数未用完则进入 correct_sql，修正后再回到这里重新校验
 修正次数用完仍未通过时，本节点直接抛出异常结束本次查询
@@ -13,6 +14,7 @@ from app.agent.context import DataAgentContext
 from app.agent.state import DataAgentState
 from app.conf.app_config import app_config
 from app.core.log import logger
+from app.core.sql_lint import ForeignKey, lint_sql
 from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
 
 
@@ -51,6 +53,42 @@ async def validate_sql(state: DataAgentState, runtime: Runtime[DataAgentContext]
         # 不中断图执行，把错误写入状态，由条件边进入 correct_sql
         return {"error": error}
 
+    # 能执行不代表业务上正确：再用外键 ref 关系做语义检查（扇出聚合、关联条件不符合 ref）
+    issues = await _semantic_issues(sql, runtime)
+    if issues:
+        attempts = state.get("correct_attempts", 0)
+        detail = "SQL 可以执行，但存在业务逻辑问题：\n" + "\n".join(
+            f"- {issue}" for issue in issues
+        )
+        logger.info(f"SQL语义检查发现问题（已修正 {attempts} 次）：{issues}")
+        if attempts < app_config.agent.max_correct_attempts:
+            writer(
+                {"type": "progress", "step": step, "status": "error", "detail": detail}
+            )
+            return {"error": detail, "lint_issues": issues}
+        # 修正次数用完：语义检查只是提示，可能误报，不阻断执行
+        logger.warning(f"SQL语义问题在修正后仍存在，继续执行：{issues}")
+        writer(
+            {"type": "progress", "step": step, "status": "success", "detail": detail}
+        )
+        return {"error": None, "lint_issues": issues}
+
     logger.info("SQL校验通过")
     writer({"type": "progress", "step": step, "status": "success"})
-    return {"error": None}
+    return {"error": None, "lint_issues": []}
+
+
+async def _semantic_issues(sql: str, runtime: Runtime[DataAgentContext]) -> list[str]:
+    """按配置对 SQL 做语义检查；外键关系从元数据库读取，检查本身出错时不影响主流程"""
+    if not app_config.agent.semantic_check:
+        return []
+    try:
+        meta_mysql_repository = runtime.context["meta_mysql_repository"]
+        fks = [
+            ForeignKey(fk.table_id, fk.name, *fk.ref.split(".", 1))
+            for fk in await meta_mysql_repository.get_foreign_key_columns()
+        ]
+        return lint_sql(sql, fks)
+    except Exception as e:
+        logger.warning(f"SQL语义检查失败，跳过：{e}")
+        return []

@@ -22,10 +22,16 @@ from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
 from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepository
 from app.repositories.qdrant.column_qdrant_repository import ColumnQdrantRepository
 from app.repositories.qdrant.metric_qdrant_repository import MetricQdrantRepository
+from app.repositories.qdrant.sql_example_qdrant_repository import (
+    SqlExampleQdrantRepository,
+)
+from app.repositories.qdrant.term_qdrant_repository import TermQdrantRepository
 from app.services.meta_knowledge_service import MetaKnowledgeService
 
 
-async def build(config_path: Path, reset: bool = False):
+async def build(
+    config_path: Path, reset: bool = False, examples_path: Path | None = None
+):
     """初始化依赖并执行一次元数据知识构建"""
 
     # 初始化元数据MySQL客户端
@@ -60,10 +66,16 @@ async def build(config_path: Path, reset: bool = False):
             embedding_client=embedding_client,
             value_es_repository=value_es_repository,
             metric_qdrant_repository=metric_qdrant_repository,
+            term_qdrant_repository=TermQdrantRepository(qdrant_client_manager.client),
+            sql_example_qdrant_repository=SqlExampleQdrantRepository(
+                qdrant_client_manager.client
+            ),
         )
 
         # 真正进入服务层的构建逻辑
-        await meta_knowledge_service.build(config_path, reset=reset)
+        await meta_knowledge_service.build(
+            config_path, reset=reset, examples_path=examples_path
+        )
 
     # 结束后关闭客户端连接
     await meta_mysql_client_manager.close()
@@ -80,7 +92,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--reset", action="store_true", help="构建前清空全部元数据知识库"
     )
+    # 已验证问答示例文件，不存在时跳过
+    parser.add_argument("--examples", default="conf/sql_examples.yaml")
     args = parser.parse_args()
 
     # 将字符串路径转成 Path，再启动异步 build
-    asyncio.run(build(Path(args.conf), reset=args.reset))
+    examples = Path(args.examples)
+    asyncio.run(
+        build(
+            Path(args.conf),
+            reset=args.reset,
+            examples_path=examples if examples.exists() else None,
+        )
+    )

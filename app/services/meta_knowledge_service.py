@@ -17,15 +17,19 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import yaml
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from omegaconf import OmegaConf
 
 from app.conf.meta_config import MetaConfig, validate_meta_config
 from app.core.log import logger
+from app.core.sql_safety import ensure_readonly, referenced_tables
 from app.entities.column_info import ColumnInfo
 from app.entities.column_metric import ColumnMetric
 from app.entities.metric_info import MetricInfo
+from app.entities.sql_example import SqlExample
 from app.entities.table_info import TableInfo
+from app.entities.term_info import TermInfo
 from app.entities.value_info import ValueInfo
 from app.repositories.es.value_es_repository import ValueESRepository
 from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
@@ -33,6 +37,10 @@ from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepositor
 from app.repositories.qdrant.base_qdrant_repository import make_point_id
 from app.repositories.qdrant.column_qdrant_repository import ColumnQdrantRepository
 from app.repositories.qdrant.metric_qdrant_repository import MetricQdrantRepository
+from app.repositories.qdrant.sql_example_qdrant_repository import (
+    SqlExampleQdrantRepository,
+)
+from app.repositories.qdrant.term_qdrant_repository import TermQdrantRepository
 
 
 def _json_safe(value):
@@ -59,6 +67,8 @@ class MetaKnowledgeService:
         embedding_client: HuggingFaceEndpointEmbeddings,
         value_es_repository: ValueESRepository,
         metric_qdrant_repository: MetricQdrantRepository,
+        term_qdrant_repository: TermQdrantRepository | None = None,
+        sql_example_qdrant_repository: SqlExampleQdrantRepository | None = None,
     ):
         # meta repository 负责结构化元数据的落库
         self.meta_mysql_repository: MetaMySQLRepository = meta_mysql_repository
@@ -72,6 +82,9 @@ class MetaKnowledgeService:
         self.value_es_repository: ValueESRepository = value_es_repository
         # 指标向量集合和字段向量集合分开管理，便于后续按对象类型独立召回
         self.metric_qdrant_repository: MetricQdrantRepository = metric_qdrant_repository
+        # 业务术语和已验证问答示例是可选的知识，没有传入仓储时跳过
+        self.term_qdrant_repository = term_qdrant_repository
+        self.sql_example_qdrant_repository = sql_example_qdrant_repository
 
     async def _save_tables_to_meta_db(
         self, meta_config: MetaConfig
@@ -302,6 +315,70 @@ class MetaKnowledgeService:
         )
         await self.metric_qdrant_repository.upsert(ids, embeddings, payloads)
 
+    async def _embed(self, texts: list[str], batch_size: int = 20) -> list[list[float]]:
+        """分批调用 Embedding 服务，返回与 texts 顺序一致的向量"""
+        embeddings: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            embeddings.extend(
+                await self.embedding_client.aembed_documents(texts[i : i + batch_size])
+            )
+        return embeddings
+
+    async def _save_terms_to_qdrant(self, meta_config: MetaConfig):
+        """业务术语以配置为准整体替换：名称和每个别名各写一个向量点"""
+        repo = self.term_qdrant_repository
+        await repo.delete_collection()
+        await repo.ensure_collection()
+        points = []
+        for term in meta_config.terms:
+            term_info = TermInfo(
+                id=term.name,
+                name=term.name,
+                definition=term.definition,
+                alias=list(term.alias),
+            )
+            for text in [term.name, *term.alias]:
+                points.append(
+                    (make_point_id(term_info.id, text), text, asdict(term_info))
+                )
+        embeddings = await self._embed([text for _, text, _ in points])
+        await repo.upsert([p[0] for p in points], embeddings, [p[2] for p in points])
+
+    @staticmethod
+    def load_examples(path: Path, table_names: set[str]) -> list[SqlExample]:
+        """读取并校验已验证问答示例：SQL 必须只读，引用的表必须在元数据配置中"""
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+        examples, errors = [], []
+        for i, item in enumerate(raw, start=1):
+            question, sql = item["question"].strip(), item["sql"].strip()
+            try:
+                ensure_readonly(sql)
+                tables = referenced_tables(sql)
+            except ValueError as e:
+                errors.append(f"第 {i} 条示例 SQL 无效：{e}")
+                continue
+            unknown = set(tables) - table_names
+            if unknown:
+                errors.append(f"第 {i} 条示例引用了未配置的表：{sorted(unknown)}")
+            examples.append(
+                SqlExample(id=f"ex_{i:03d}", question=question, sql=sql, tables=tables)
+            )
+        if errors:
+            raise ValueError("问答示例有误：\n" + "\n".join(errors))
+        return examples
+
+    async def _save_examples_to_qdrant(self, examples: list[SqlExample]):
+        """问答示例以文件为准整体替换：按示例问题建立向量"""
+        repo = self.sql_example_qdrant_repository
+        await repo.delete_collection()
+        await repo.ensure_collection()
+        embeddings = await self._embed([e.question for e in examples])
+        await repo.upsert(
+            [make_point_id(e.id, e.question) for e in examples],
+            embeddings,
+            [asdict(e) for e in examples],
+        )
+
     async def reset(self):
         """清空 Meta MySQL 四张元数据表 两个 Qdrant 集合和 ES 取值索引"""
         async with self.meta_mysql_repository.session.begin():
@@ -309,9 +386,14 @@ class MetaKnowledgeService:
         await self.column_qdrant_repository.delete_collection()
         await self.metric_qdrant_repository.delete_collection()
         await self.value_es_repository.delete_index()
+        for repo in (self.term_qdrant_repository, self.sql_example_qdrant_repository):
+            if repo is not None:
+                await repo.delete_collection()
         logger.info("已清空元数据知识库")
 
-    async def build(self, config_path: Path, reset: bool = False):
+    async def build(
+        self, config_path: Path, reset: bool = False, examples_path: Path | None = None
+    ):
         """读取配置并依次构建 Meta MySQL Qdrant 和 ES 中的元数据索引"""
         context = OmegaConf.load(config_path)
         schema = OmegaConf.structured(MetaConfig)
@@ -321,6 +403,10 @@ class MetaKnowledgeService:
         errors = validate_meta_config(meta_config)
         if errors:
             raise ValueError("元数据配置有误：\n" + "\n".join(errors))
+        examples: list[SqlExample] = []
+        if examples_path and self.sql_example_qdrant_repository is not None:
+            table_names = {t.name for t in meta_config.tables or []}
+            examples = self.load_examples(examples_path, table_names)
 
         if reset:
             await self.reset()
@@ -346,3 +432,11 @@ class MetaKnowledgeService:
             # 对指标信息建立向量索引
             await self._save_metrics_to_qdrant(metric_infos)
             logger.info("为指标信息建立向量索引成功")
+
+        if meta_config.terms and self.term_qdrant_repository is not None:
+            await self._save_terms_to_qdrant(meta_config)
+            logger.info(f"写入业务术语 {len(meta_config.terms)} 条")
+
+        if examples:
+            await self._save_examples_to_qdrant(examples)
+            logger.info(f"写入已验证问答示例 {len(examples)} 条")

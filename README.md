@@ -102,6 +102,7 @@ shopkeeper-agent/
 ├── conf/                 # app_config.yaml（运行配置）、meta_config.yaml（元数据配置）
 ├── docker/               # Docker Compose、MySQL 初始化 SQL、ES IK 插件
 ├── docs/                 # 架构图、截图、设计文档
+├── evals/                # 评测集与结果判定
 ├── frontend/             # React 前端
 ├── prompts/              # 各节点的 Prompt 模板
 ├── tests/                # 单元测试
@@ -273,6 +274,7 @@ pnpm dev
 uv run ruff check --fix .   # 代码检查
 uv run ruff format .        # 格式化
 uv run pytest               # 单元测试
+uv run python -m evals.check_dataset   # 在数仓上校验评测集
 cd frontend && pnpm lint    # 前端类型检查
 ```
 
@@ -281,7 +283,7 @@ cd frontend && pnpm lint    # 前端类型检查
 ## 当前限制与规划
 
 - **单轮问答**：暂不支持多轮追问和会话管理，每个问题独立处理。
-- **缺少评测体系**：还没有评测集和自动化回归测试，改动 Prompt 或模型后，无法量化效果变化。
+- **评测体系尚不完整**：已有 50 道业务口径陷阱评测题（`evals/datasets/traps.yaml`）和结果判定器，但还没有自动答题打分的 runner 和回归门禁。
 - **生产化能力**：权限控制、多租户、查询缓存、限流、监控告警等暂未涉及。
 
 评测体系和多轮问数的设计方案见 [docs/design/eval-and-multiturn.md](docs/design/eval-and-multiturn.md)。

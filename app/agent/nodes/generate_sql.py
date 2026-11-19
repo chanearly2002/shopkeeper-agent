@@ -12,6 +12,7 @@ from langgraph.runtime import Runtime
 
 from app.agent.context import DataAgentContext
 from app.agent.llm import llm
+from app.agent.nodes.recall_knowledge import format_examples, format_terms
 from app.agent.state import DataAgentState
 from app.core.log import logger
 from app.core.sql_safety import clean_sql
@@ -41,6 +42,8 @@ async def generate_sql(state: DataAgentState, runtime: Runtime[DataAgentContext]
                 "date_info",
                 "db_info",
                 "query",
+                "terms",
+                "examples",
             ],
         )
         # SQL 生成节点只需要纯文本 SQL，不能要求模型输出 JSON 或 Markdown 代码块
@@ -59,6 +62,8 @@ async def generate_sql(state: DataAgentState, runtime: Runtime[DataAgentContext]
                 "date_info": yaml.dump(date_info, allow_unicode=True, sort_keys=False),
                 "db_info": yaml.dump(db_info, allow_unicode=True, sort_keys=False),
                 "query": query,
+                "terms": format_terms(state.get("term_infos", [])),
+                "examples": format_examples(state.get("example_infos", [])),
             }
         )
         # 模型偶尔仍会输出 ```sql 代码块或末尾分号，统一清洗成可执行的纯 SQL

@@ -16,6 +16,7 @@ from app.agent.state import (
     MetricInfoState,
     TableInfoState,
 )
+from app.conf.meta_config import columns_in_text
 from app.core.log import logger
 from app.entities.column_info import ColumnInfo
 from app.entities.metric_info import MetricInfo
@@ -78,6 +79,18 @@ async def merge_retrieved_info(
             if value not in retrieved_column_infos_map[column_id].examples:
                 retrieved_column_infos_map[column_id].examples.append(value)
 
+        # 3.5 补齐业务术语引用的字段
+        # 术语定义里用 表名.字段名 写出了口径涉及的字段，例如“高价值会员”引用 dim_user.member_level，
+        # 这些字段未必被向量召回命中，但生成 SQL 时必须用到
+        for term_info in state.get("term_infos", []):
+            for column_id in columns_in_text(term_info.definition):
+                if column_id not in retrieved_column_infos_map:
+                    column_info = await meta_mysql_repository.get_column_info_by_id(
+                        column_id
+                    )
+                    if column_info:
+                        retrieved_column_infos_map[column_id] = column_info
+
         # 4. 按表组织字段上下文
         # SQL 生成提示词通常按“表 -> 字段列表”的方式描述结构，
         # 所以这里先把分散的字段按 table_id 归到各自所属表下面。
@@ -87,6 +100,11 @@ async def merge_retrieved_info(
             if table_id not in table_to_columns_map:
                 table_to_columns_map[table_id] = []
             table_to_columns_map[table_id].append(column_info)
+
+        # 4.5 已验证问答示例用到的表并入候选，示例是相似问题的正确写法，表的选择是强信号
+        for example_info in state.get("example_infos", []):
+            for table_id in example_info.tables:
+                table_to_columns_map.setdefault(table_id, [])
 
         # 5. 补齐关联路径上的中间表
         # 候选表之间可能隔着没被召回的表，例如 fact_order 和 dim_category 之间

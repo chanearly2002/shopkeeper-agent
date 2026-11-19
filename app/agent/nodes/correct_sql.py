@@ -13,6 +13,7 @@ from langgraph.runtime import Runtime
 
 from app.agent.context import DataAgentContext
 from app.agent.llm import llm
+from app.agent.nodes.recall_knowledge import format_terms
 from app.agent.state import DataAgentState
 from app.core.log import logger
 from app.core.sql_safety import clean_sql
@@ -46,6 +47,7 @@ async def correct_sql(state: DataAgentState, runtime: Runtime[DataAgentContext])
                 "date_info",
                 "db_info",
                 "query",
+                "terms",
                 "sql",
                 "error",
             ],
@@ -66,6 +68,7 @@ async def correct_sql(state: DataAgentState, runtime: Runtime[DataAgentContext])
                 "date_info": yaml.dump(date_info, allow_unicode=True, sort_keys=False),
                 "db_info": yaml.dump(db_info, allow_unicode=True, sort_keys=False),
                 "query": query,
+                "terms": format_terms(state.get("term_infos", [])),
                 "sql": sql,
                 "error": error,
             }

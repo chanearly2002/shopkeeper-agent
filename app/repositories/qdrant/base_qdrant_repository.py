@@ -95,6 +95,26 @@ class BaseQdrantRepository[EntityT]:
                 wait=True,
             )
 
+    async def scroll_all(self) -> list[EntityT]:
+        """按实体 id 去重后返回集合里的全部实体，适合术语这类数量很少、需要精确匹配的数据"""
+        if not await self.client.collection_exists(self.collection_name):
+            return []
+        entities: dict[str, EntityT] = {}
+        offset = None
+        while True:
+            points, offset = await self.client.scroll(
+                collection_name=self.collection_name,
+                limit=256,
+                offset=offset,
+                with_vectors=False,
+            )
+            for point in points:
+                entities.setdefault(
+                    point.payload["id"], self.entity_cls(**point.payload)
+                )
+            if offset is None:
+                return list(entities.values())
+
     async def search(
         self,
         embedding: list[float],
@@ -102,6 +122,9 @@ class BaseQdrantRepository[EntityT]:
         limit: int | None = None,
     ) -> list[EntityT]:
         """按向量相似度检索，并把 payload 还原为业务实体"""
+        if not await self.client.collection_exists(self.collection_name):
+            # 可选的知识（如问答示例）没有构建过时，召回直接返回空
+            return []
         result = await self.client.query_points(
             collection_name=self.collection_name,
             query=embedding,

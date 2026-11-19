@@ -12,6 +12,7 @@ from langgraph.runtime import Runtime
 
 from app.agent.context import DataAgentContext
 from app.agent.llm import llm
+from app.agent.nodes.recall_knowledge import format_terms
 from app.agent.state import DataAgentState, TableInfoState
 from app.core.log import logger
 from app.prompt.prompt_loader import load_prompt
@@ -31,7 +32,7 @@ async def filter_table(state: DataAgentState, runtime: Runtime[DataAgentContext]
         # table_infos 是嵌套结构，转成 YAML 后更适合放进提示词，也保留中文字段说明
         prompt = PromptTemplate(
             template=load_prompt("filter_table_info"),
-            input_variables=["query", "table_infos"],
+            input_variables=["query", "table_infos", "terms"],
         )
         # filter_table_info prompt 要求模型只输出 JSON 对象：表名 -> 字段名列表
         output_parser = JsonOutputParser()
@@ -41,6 +42,7 @@ async def filter_table(state: DataAgentState, runtime: Runtime[DataAgentContext]
         result = await chain.ainvoke(
             {
                 "query": query,
+                "terms": format_terms(state.get("term_infos", [])),
                 "table_infos": yaml.dump(
                     table_infos, allow_unicode=True, sort_keys=False
                 ),

@@ -653,3 +653,34 @@ metrics:
       - fact_order.order_id
       - fact_order.pay_time
     alias: [回购率, 重复购买率]
+
+# 业务术语：把容易有歧义的业务说法映射到确定的口径（参考 SQLBot 的术语配置）
+# 问题中出现术语名或别名时，定义会进入 SQL 生成提示词，定义里写出的 表名.字段名 会补进候选上下文
+terms:
+  - name: 销售额
+    definition: 默认指支付金额，只统计已支付订单（fact_order.pay_time IS NOT NULL），时间按支付日期 fact_order.pay_date_id 筛选。按商品、类目、品牌、活动拆分时使用订单明细 fact_order_item.pay_amount，不要对订单表金额关联明细后求和。
+    alias: [成交额, 卖了多少钱, 营收]
+  - name: 下单
+    definition: 下单相关的统计包含未支付和已取消的订单，时间按下单日期 fact_order.order_date_id 筛选，不要求 fact_order.pay_time 不为空。
+    alias: [拍下]
+  - name: 退款
+    definition: 退款金额默认只统计退款成功的记录（fact_refund.refund_status = '退款成功'）。“申请退款”按申请日期 fact_refund.apply_date_id 筛选，“退款到账/完成退款”按完成时间 fact_refund.finish_time 筛选。
+    alias: [退款金额, 退了多少钱]
+  - name: 城市
+    definition: 订单的地区默认指收货城市（fact_order.receiver_region_id 关联 dim_region）；问“某地用户”“常住在”“用户所在”时，才用用户常住城市（dim_user.region_id 关联 dim_region）。
+    alias: [发往, 收货地, 地区, 大区, 省份]
+  - name: 高价值会员
+    definition: 会员等级为铂金或钻石的用户，即 dim_user.member_level IN ('铂金', '钻石')。
+    alias: [高等级会员, 高端会员]
+  - name: 付费会员
+    definition: 开通了付费会员的用户，即 dim_user.is_plus = 1。
+    alias: [PLUS会员, PLUS用户]
+  - name: 新用户
+    definition: 在统计期内注册的用户，按 dim_user.register_date 判断，与是否下单无关。
+    alias: [新注册用户, 新客, 新增用户]
+  - name: 双11
+    definition: “双11当天”指 11 月 11 日这一天的日期；“双11期间”按 dim_activity 中对应年份双11活动的 dim_activity.start_date 到 dim_activity.end_date；“双11活动商品”按订单明细 fact_order_item.activity_id 关联到该活动，与日期无关。618、双12 等大促同理。
+    alias: [双十一, 618, 双12, 双十二, 大促]
+  - name: 自营
+    definition: 平台自营店铺，即 dim_shop.shop_type = '自营'。
+    alias: [自营店]

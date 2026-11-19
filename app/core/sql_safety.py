@@ -68,3 +68,11 @@ def ensure_readonly(sql: str, dialect: str = "mysql") -> None:
     for node in statement.walk():
         if isinstance(node, _FORBIDDEN_NODES):
             raise UnsafeSQLError(f"查询中包含不允许的操作：{node.key.upper()}")
+
+
+def referenced_tables(sql: str, dialect: str = "mysql") -> list[str]:
+    """返回 SQL 引用的物理表名（排除 CTE 名），按首次出现顺序去重"""
+    tree = sqlglot.parse_one(sql, read=dialect)
+    cte_names = {cte.alias_or_name for cte in tree.find_all(exp.CTE)}
+    names = [t.name for t in tree.find_all(exp.Table) if t.name not in cte_names]
+    return list(dict.fromkeys(names))

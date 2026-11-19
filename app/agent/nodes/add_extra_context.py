@@ -25,12 +25,10 @@ async def add_extra_context(state: DataAgentState, runtime: Runtime[DataAgentCon
         dw_mysql_repository = runtime.context["dw_mysql_repository"]
 
         # 当前日期信息会帮助模型处理“今天 本月 本季度 最近 N 天”等相对时间表达
-        # 配置了 agent.today 时以它为准，让相对时间落在数仓实际有数据的区间内
-        today = (
-            date.fromisoformat(app_config.agent.today)
-            if app_config.agent.today
-            else date.today()
-        )
+        # 优先级：请求里指定的 today > 配置 agent.today > 真实当前日期
+        # 评测时每道题可以指定自己的“今天”，配置则让相对时间落在数仓实际有数据的区间内
+        today_str = state.get("today") or app_config.agent.today
+        today = date.fromisoformat(today_str) if today_str else date.today()
         date_str = today.strftime("%Y-%m-%d")
         weekday = today.strftime("%A")
         # 季度用整数，和 dim_date.quarter 的类型一致，避免模型写出 quarter = 'Q4' 这种查不到数据的条件

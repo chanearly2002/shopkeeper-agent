@@ -60,3 +60,7 @@ Thumbs.db
 
 # Local TEI embedding model files (large)
 docker/embedding/
+
+# 评测报告与 LLM 调用缓存
+/evals/reports/
+/evals/.cache/
