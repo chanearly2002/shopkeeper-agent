@@ -89,8 +89,10 @@ graph_builder.add_conditional_edges(
 graph_builder.add_edge("correct_sql", "validate_sql")
 graph_builder.add_edge("run_sql", END)
 
-# 编译后的 graph 是对外使用的 Agent 执行入口
-graph = graph_builder.compile()
+# 编译后的 graph 是对外使用的单轮执行入口；多轮会话图（session_graph.py）在节点里调用它
+# checkpointer=False：作为子图被调用时也不继承外层会话图的 checkpointer，
+# 单轮的中间状态体积大、只属于本轮，不应该写进会话检查点
+graph = graph_builder.compile(checkpointer=False)
 
 # print(graph.get_graph().draw_mermaid())
 

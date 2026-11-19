@@ -118,6 +118,14 @@ class AgentConfig:
 
 
 @dataclass
+class ConversationConfig:
+    """多轮问数配置"""
+
+    history_turns: int
+    result_preview_rows: int
+
+
+@dataclass
 class ApiConfig:
     """HTTP 接口配置"""
 
@@ -137,6 +145,7 @@ class AppConfig:
     llm: LLMConfig
     knowledge: KnowledgeConfig
     agent: AgentConfig
+    conversation: ConversationConfig
     api: ApiConfig
 
 
