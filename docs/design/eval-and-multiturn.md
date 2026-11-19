@@ -193,9 +193,9 @@ LLM 调用即使 `temperature=0` 也不完全确定，而且每次全量跑都�
 
 | 步骤 | 产出 | 预计 |
 | --- | --- | --- |
-| 1 | `compare.py` + 单元测试（**已完成**）；`today` 改为请求级（未完成） | 0.5 天 |
+| 1 | `compare.py` + 单元测试；`today` 改为请求级（**均已完成**） | 0.5 天 |
 | 2 | 种子题：已完成 10 类业务口径陷阱 × 5 题（`evals/datasets/traps.yaml`），每题都在数仓上校验过；安全题、空结果题、歧义题尚未加入 | 1～2 天 |
-| 3 | `runner.py`：逐题执行、收集中间状态、判定、输出 JSONL 与 Markdown 报告 | 1 天 |
+| 3 | `runner.py`：逐题执行、收集中间状态、判定、输出 JSONL 与 Markdown 报告（**已完成**，另含归因、录制回放、基线对比，见 `borrowing-and-roadmap.md`） | 1 天 |
 | 4 | 失败归因 + 按标签统计 | 0.5 天 |
 | 5 | replay 缓存 + baseline 对比 + 退出码 | 0.5 天 |
 | 6 | GitHub Actions：pytest + replay 评测 | 0.5 天 |
