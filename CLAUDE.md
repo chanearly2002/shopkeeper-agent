@@ -21,6 +21,8 @@ uv sync                                        # 安装依赖（会自动拉取 
 cp .env.example .env                           # 填入 LLM_API_KEY（必需，见下方“陷阱”）
 docker compose -f docker/docker-compose.yaml up -d
 uv run python -m app.scripts.generate_dw_data  # 重建 dw 的表并写入生成数据（固定种子，约 17 秒；--scale small 更快）
+uv run python -m app.scripts.export_dw_sql     # 导出固定 SQL 快照 docker/snapshot/dw_snapshot.sql.gz（不连库；--database 换库名）
+gunzip -c docker/snapshot/dw_snapshot.sql.gz | docker exec -i mysql mysql -uroot -pdili123   # 不用 Python 直接导入同样的数据
 uv run python -m app.scripts.build_meta_knowledge -c conf/meta_config.yaml   # 构建元数据知识库（幂等，可重复运行；同时写入业务术语和 conf/sql_examples.yaml 的示例）
 uv run python -m app.scripts.build_meta_knowledge -c conf/meta_config.yaml --reset  # 先清空全部知识库再构建
 uv run fastapi dev main.py                     # 启动后端，POST http://127.0.0.1:8000/api/query
@@ -169,6 +171,7 @@ extract_keywords ─┬─ recall_column    ─┐
   - 金额：订单头 `order_amount = total_amount − discount_amount + freight_amount`；明细 `pay_amount = item_amount − discount_amount`（不含运费）；订单头与明细关联后对订单头金额求和会扇出
 - 指标口径（`conf/meta_config.yaml` 的 13 个指标，description 里写明公式，会原样进入 SQL 生成 Prompt）：下单金额（GMV，含未支付）、支付金额（销售额的默认口径）、净支付金额、下单/支付订单数、支付买家数、客单价、笔单价（AOV）、件单价（ASP）、毛利、退款率、浏览转化率、复购率
 - 生成器内部金额按“分”做整数运算，保证订单头与明细严格对平；`tests/test_dw_generator.py` 校验这些不变式和可复现性。**改生成器会改变数据，未来评测集的标准答案要随之重算**
+- `docker/snapshot/dw_snapshot.sql.gz`：同一份数据的自包含 SQL 快照（建库 + 建表 + 数据，约 5 MB，解压 34 MB），由 `export_dw_sql` 从生成器直接渲染，字节级可复现；导入后与 `generate_dw_data` 写入的逐表 `CHECKSUM TABLE` 一致。`tests/test_export_dw_sql.py` 会检查它是否过期（约 5 秒）。导入方法和探查用 SQL 见 `docker/snapshot/README.md`
 
 ## 开发约定
 
@@ -193,7 +196,7 @@ extract_keywords ─┬─ recall_column    ─┐
 - **新增 SSE 事件类型**：节点里 `writer({...})` → `frontend/src/types/agent.ts` 的 `AgentEvent` → `App.tsx` 的 `onEvent`（未识别的事件类型会被忽略，只有 `type: error` 才显示为失败）
 - **会话图加节点 / 分支**（`answer_from_result`、澄清等）：`app/agent/nodes/<node>.py`（参数类型是 `SessionState`）→ `session_graph.py` 的 `build_session_graph` → 新的本轮字段加到 `SessionState` 并保证每轮覆盖 → `StepRail.tsx`。意图取值改动同步 `app/core/conversation.py` 的 `INTENTS`、`prompts/contextualize_question.prompt`、`frontend/src/types/agent.ts` 的 `Intent` 和 `MessageBubble.tsx` 的 `intentLabels`
 - **新增多轮评测题**：加到 `evals/datasets/multiturn.yaml`（第 2 轮起必须有 `gold_intent`、`gold_standalone`，`trap_sql` 一般是“没有正确承接上文”的写法）→ `uv run python -m evals.check_dataset -d evals/datasets/multiturn.yaml --per-category 0` → `uv run pytest`（`tests/test_eval_dataset.py` 固定了 20 段对话）。改写 Prompt 的 few-shot 示例与评测题不要用相同的实体和年份（示例用 2024 年）
-- **数仓加表/字段/指标**：改 `docker/mysql/dw.sql` → 改 `app/scripts/dw_generator.py` 生成对应数据 → 改 `conf/meta_config.yaml`（外键加 `ref`）→ 跑 `generate_dw_data`（会按 dw.sql 重建表）→ 重跑知识库构建（删除了表或指标时加 `--reset`）→ `uv run pytest`
+- **数仓加表/字段/指标**：改 `docker/mysql/dw.sql` → 改 `app/scripts/dw_generator.py` 生成对应数据 → 改 `conf/meta_config.yaml`（外键加 `ref`）→ 跑 `generate_dw_data`（会按 dw.sql 重建表）→ 重跑知识库构建（删除了表或指标时加 `--reset`）→ `export_dw_sql` 重新导出快照（同步更新 `docker/snapshot/README.md` 的关系表）→ `uv run pytest`
 - **新增评测题**：加到 `evals/datasets/traps.yaml`（字段说明见文件头）→ 每题必须有 `gold_sql` 和一条典型错误写法 `trap_sql` → `uv run python -m evals.check_dataset` 确认错误写法的结果与标准答案不同、保留两位小数后仍可区分 → `uv run pytest`（每类题数在 `tests/test_eval_dataset.py` 里固定为 5，增加题数时同步修改）
 - **新增业务术语 / 问答示例**：改 `meta_config.yaml` 的 `terms` 或 `conf/sql_examples.yaml` → `uv run python -m evals.check_dataset`（示例能执行、不泄漏）→ 重跑知识库构建
 - **新增语义检查规则**：`app/core/sql_lint.py` 加纯函数规则 → `tests/test_sql_lint.py` 必须保持“评测集全部标准 SQL 零误报”

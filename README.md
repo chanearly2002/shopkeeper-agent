@@ -177,6 +177,12 @@ uv run python -m app.scripts.generate_dw_data
 
 用固定随机种子生成两年的电商交易数据并写入数仓（约 6 万订单、20 万条行为，耗时十几秒）。每次运行都会重建数仓的表，得到完全相同的数据。想快速试用可以加 `--scale small`，订单和行为数据量为默认的十分之一。
 
+也可以不跑 Python，直接导入仓库里的固定 SQL 快照 `docker/snapshot/dw_snapshot.sql.gz`（数据完全相同，适合用 MySQL 客户端探查数据结构，导入方法和探查用的 SQL 见 [docker/snapshot/README.md](docker/snapshot/README.md)）：
+
+```bash
+gunzip -c docker/snapshot/dw_snapshot.sql.gz | docker exec -i mysql mysql -uroot -pdili123
+```
+
 ### 6. 构建元数据知识库
 
 ```bash
