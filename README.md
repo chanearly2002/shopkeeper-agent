@@ -14,8 +14,6 @@
 
 </div>
 
-![电商问数前端首页](docs/images/shopkeeper-agent-home.jpg)
-
 ## 项目简介
 
 业务人员通常不会写 SQL，也记不住每张表的结构、字段含义和指标口径。直接把问题交给大模型生成 SQL，容易出现选错表、用错字段、指标口径不一致，甚至编造字段等问题。
@@ -23,13 +21,13 @@
 shopkeeper-agent 的做法是**先检索、再生成、最后校验执行**：
 
 1. **离线构建元数据知识库**：把数仓中的表、字段、指标及字段真实取值，分别写入 MySQL（结构化元数据）、Qdrant（语义向量）和 Elasticsearch（取值全文索引）。
-2. **在线问数**：用 LangGraph 编排多步流程——抽取关键词、三路并行召回、合并与过滤上下文、生成 SQL、只读校验与自动修正、执行查询。每一步的进度都通过 SSE 实时推送到前端。
+2. **在线问数**：用 LangGraph 编排多步流程——抽取关键词、四路并行召回（字段、取值、指标、业务知识）、合并与过滤上下文、生成 SQL、只读与语义校验、自动修正、执行查询。每一步的进度都通过 SSE 实时推送到前端。
 
 例如问“2025 年美妆个护的支付金额”，系统会召回取值“美妆个护”所在的 `dim_category.category_l1` 字段，以及“支付金额”指标的口径（只统计 `pay_time` 不为空的订单）；发现订单表和类目表之间还隔着订单明细表和商品表，就自动补上这两张中间表，再按外键关系生成多表 join 查询。
 
 ## 核心特性
 
-- **混合检索**：字段和指标用 Qdrant 做语义召回，字段取值用 Elasticsearch + IK 分词做全文召回，三路并行；召回结果再从 MySQL 补齐指标依赖字段和主外键。
+- **混合检索**：字段和指标用 Qdrant 做语义召回，字段取值用 Elasticsearch + IK 分词做全文召回，再加上业务术语与已验证示例，四路并行；召回结果再从 MySQL 补齐指标依赖字段和主外键。
 - **关联路径补全**：元数据中为每个外键声明关联目标（`ref`），系统据此找出候选表之间缺失的中间表，并让模型按 `ref` 编写 JOIN 条件，避免经由维度表关联造成的金额重复计算。
 - **分步推理**：检索词扩展、表字段过滤、指标过滤、SQL 生成各由独立节点完成。大模型只负责“选择”，上下文结构的裁剪由程序完成。
 - **SQL 语义检查**：EXPLAIN 之后再按外键关系检查“能执行但算错”的写法（如订单金额关联明细后重复计算），发现问题交给模型修正。
@@ -44,7 +42,7 @@ shopkeeper-agent 的做法是**先检索、再生成、最后校验执行**：
 
 ## 系统架构
 
-![电商问数系统架构图](docs/images/shopkeeper-agent-system-architecture.svg)
+> 架构图和界面截图沿用自上游项目，已与当前实现不符，暂时移除；本项目开发完成后会按当前实现重新绘制。
 
 ### 问数流程
 
@@ -57,12 +55,13 @@ contextualize（结合上文改写追问，首轮跳过）─ run_pipeline（单
 单轮问数流水线：
 
 ```
-extract_keywords ─┬─ recall_column ─┐
-                  ├─ recall_value  ─┼─ merge_retrieved_info ─┬─ filter_table  ─┐
-                  └─ recall_metric ─┘                        └─ filter_metric ─┴─ add_extra_context
+extract_keywords ─┬─ recall_column    ─┐
+                  ├─ recall_value     ─┤
+                  ├─ recall_metric    ─┼─ merge_retrieved_info ─┬─ filter_table  ─┐
+                  └─ recall_knowledge ─┘                        └─ filter_metric ─┴─ add_extra_context
   ─ generate_sql ─ validate_sql ─┬─(通过)─ run_sql ─ 结束
                     ▲            └─(有误)─ correct_sql ─┐
-                    └───────────────────────────────────┘   修正次数用完则返回错误
+                    └───────────────────────────────────┘   修正次数用完：语法错误则返回错误，仅剩语义提示则告警后执行
 ```
 
 | 节点 | 作用 |
@@ -70,14 +69,13 @@ extract_keywords ─┬─ recall_column ─┐
 | `extract_keywords` | jieba 抽取关键词，原始问题本身也作为检索词保留 |
 | `recall_column` / `recall_metric` | 大模型扩展检索词，向量化后在 Qdrant 中召回字段和指标 |
 | `recall_value` | 大模型扩展取值候选，在 Elasticsearch 中召回字段真实取值（如“华北”） |
-| `merge_retrieved_info` | 合并三路结果，补齐指标依赖字段、关联路径上的中间表和各表主外键，按表组织上下文 |
+| `recall_knowledge` | 精确匹配业务术语（如“高价值会员”“双11当天”），按问题相似度召回已验证的问题-SQL 示例 |
+| `merge_retrieved_info` | 合并四路结果，补齐指标依赖字段、术语引用的字段、示例用到的表、关联路径上的中间表和各表主外键，按表组织上下文 |
 | `filter_table` / `filter_metric` | 大模型挑出回答问题真正需要的表、字段和指标 |
 | `add_extra_context` | 补充当前日期、季度和数据库版本 |
-| `generate_sql` / `correct_sql` | 生成 SQL；校验失败时根据报错做最小修正 |
-| `validate_sql` | 只读校验 + `EXPLAIN` |
+| `generate_sql` / `correct_sql` | 参考术语和示例生成 SQL；校验失败时根据报错做最小修正 |
+| `validate_sql` | 只读校验 + `EXPLAIN` + 按外键关系的语义检查（扇出、关联条件） |
 | `run_sql` | 执行查询，返回结果和最终 SQL |
-
-![查询结果页：执行流程与结果表格](docs/images/shopkeeper-agent-query-result.jpg)
 
 ## 技术栈
 
@@ -113,7 +111,7 @@ shopkeeper-agent/
 │   └── services/         # 知识库构建服务、问数查询服务
 ├── conf/                 # app_config.yaml（运行配置）、meta_config.yaml（元数据与术语）、sql_examples.yaml（已验证示例）
 ├── docker/               # Docker Compose、MySQL 初始化 SQL、ES IK 插件
-├── docs/                 # 架构图、截图、设计文档
+├── docs/                 # 设计文档
 ├── evals/                # 评测集与结果判定
 ├── frontend/             # React 前端
 ├── prompts/              # 各节点的 Prompt 模板
