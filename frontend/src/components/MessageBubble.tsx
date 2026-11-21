@@ -1,14 +1,26 @@
 /**
  * 聊天消息气泡组件
- * 组合展示用户问题、智能体回复、执行流程和结果表格
+ * 组合展示用户问题、智能体回复、追问改写、执行流程和结果表格
  */
-import { Bot, Copy, UserRound } from "lucide-react";
+import { Bot, Copy, PencilLine, UserRound } from "lucide-react";
 import { ResultTable } from "./ResultTable";
 import { StepRail } from "./StepRail";
 import { cn, formatTime, toClipboardText } from "../lib/format";
-import type { ChatMessage } from "../types/agent";
+import type { ChatMessage, Intent } from "../types/agent";
 
-export function MessageBubble({ message }: { message: ChatMessage }) {
+const intentLabels: Record<Intent, string> = {
+  new: "新问题",
+  followup: "追问",
+  result_qa: "结果追问",
+};
+
+type MessageBubbleProps = {
+  message: ChatMessage;
+  /** 用户认为改写有误时调用，参数是改写后的问题 */
+  onCorrectRewrite?: (standaloneQuestion: string) => void;
+};
+
+export function MessageBubble({ message, onCorrectRewrite }: MessageBubbleProps) {
   const isUser = message.role === "user";
 
   const copy = async () => {
@@ -33,6 +45,28 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
               : "border-ink/10 bg-[#fffaf1]/78 text-ink backdrop-blur",
           )}
         >
+          {!isUser && message.rewrite && (
+            <div className="mb-3 flex flex-wrap items-start gap-x-3 gap-y-2 border-l-2 border-brass/60 bg-brass/10 px-3 py-2 text-sm leading-6">
+              <span className="shrink-0 border border-brass/35 px-1.5 text-xs font-semibold leading-5 text-brass">
+                {intentLabels[message.rewrite.intent] ?? message.rewrite.intent}
+              </span>
+              <span className="min-w-0 flex-1 text-ink/80">
+                我理解为：<span className="font-semibold text-ink">{message.rewrite.standaloneQuestion}</span>
+              </span>
+              {onCorrectRewrite && (
+                <button
+                  type="button"
+                  onClick={() => onCorrectRewrite(message.rewrite!.standaloneQuestion)}
+                  className="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-ink/55 transition hover:text-ink focus:outline-none focus:ring-2 focus:ring-moss/40"
+                  title="把这句放回输入框，修改后重新提问"
+                >
+                  <PencilLine className="h-3.5 w-3.5" aria-hidden="true" />
+                  理解有误
+                </button>
+              )}
+            </div>
+          )}
+
           <div className="flex items-start justify-between gap-3">
             <p className="whitespace-pre-wrap text-[15px] leading-7">{message.content}</p>
             {!isUser && message.status !== "streaming" && (

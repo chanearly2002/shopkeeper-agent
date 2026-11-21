@@ -27,7 +27,23 @@ export type ErrorEvent = {
   message: string;
 };
 
-export type AgentEvent = ProgressEvent | ResultEvent | ErrorEvent;
+/** 每次请求的第一条事件：本轮所属的会话 id，后续追问要带上它 */
+export type SessionEvent = {
+  type: "session";
+  thread_id: string;
+};
+
+/** new：与上文无关的新问题；followup：结合上文的追问；result_qa：针对上一轮结果的提问 */
+export type Intent = "new" | "followup" | "result_qa";
+
+/** 追问改写结果：后端实际查询的独立问题 */
+export type RewriteEvent = {
+  type: "rewrite";
+  standalone_question: string;
+  intent: Intent;
+};
+
+export type AgentEvent = ProgressEvent | ResultEvent | ErrorEvent | SessionEvent | RewriteEvent;
 
 export type StepState = {
   step: string;
@@ -44,12 +60,19 @@ export type ResultMeta = {
   maxRows?: number;
 };
 
+export type Rewrite = {
+  standaloneQuestion: string;
+  intent: Intent;
+};
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
   createdAt: number;
   status?: "streaming" | "done" | "error";
+  /** 结合上文改写后的问题；只在与用户原话不同时展示 */
+  rewrite?: Rewrite;
   steps?: StepState[];
   result?: unknown;
   resultMeta?: ResultMeta;

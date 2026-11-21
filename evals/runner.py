@@ -11,9 +11,12 @@
     uv run python -m evals.runner --baseline evals/baseline.json --save-baseline
     uv run python -m evals.runner --predictor gold         # 直接用标准 SQL 作答，应为 100%
     uv run python -m evals.runner --predictor trap         # 直接用错误写法作答，应为 0%
+    uv run python -m evals.runner --multiturn teacher      # 多轮题，历史用标准答案填充（默认用 multiturn.yaml）
+    uv run python -m evals.runner --multiturn free         # 多轮题，整段对话用模型自己的历史
 
 打分方式参照 Databricks Genie 的 benchmark：执行模型 SQL 与标准 SQL，用 evals/compare.py 比较结果集
 归因参照 Uber QueryGPT：捕获问数图每个节点的输出，判断答错时是召回漏了、过滤删了，还是 SQL 写错了
+多轮评测（evals/multiturn.py）额外统计意图准确率、追问轮准确率和整段对话成功率
 报告写到 evals/reports/<时间戳>/：results.jsonl 明细、summary.json 汇总、summary.md 可读报告
 """
 
@@ -41,7 +44,7 @@ from app.conf.app_config import app_config
 from app.core.sql_safety import ensure_readonly
 from app.services.query_service import QueryService
 from evals.compare import results_equal
-from evals.dataset import DEFAULT_DATASET, ROOT, load_dataset
+from evals.dataset import DEFAULT_DATASET, MULTITURN_DATASET, ROOT, load_dataset
 from evals.llm_cache import SQLiteLLMCache
 from evals.scoring import (
     STAGE_PASS,
@@ -49,8 +52,10 @@ from evals.scoring import (
     attribute_failure,
     compare_with_baseline,
     missing_items,
+    render_dialog_markdown,
     render_markdown,
     summarize,
+    summarize_dialogs,
 )
 
 REPORT_DIR = ROOT / "evals" / "reports"
@@ -215,35 +220,45 @@ async def evaluate_case(
 
 
 def select_items(
-    items: list[dict], ids: set[str] | None, category: str | None
+    items: list[dict],
+    ids: set[str] | None,
+    category: str | None,
+    multiturn: bool = False,
 ) -> list[dict]:
-    """按 id 或类别筛选题目；多轮题暂不支持，跳过"""
+    """按 id 或类别筛选题目；单轮模式跳过多轮题（多轮题用 --multiturn 评测）"""
     selected = []
     for item in items:
         if ids and item["id"] not in ids:
             continue
         if category and item["category"] != category:
             continue
-        if len(item["turns"]) > 1:
-            print(f"跳过多轮题 {item['id']}：runner 暂只支持单轮")
+        if len(item["turns"]) > 1 and not multiturn:
+            print(f"跳过多轮题 {item['id']}：请用 --multiturn teacher / free 评测")
             continue
         selected.append(item)
     return selected
 
 
 async def run(args) -> int:
+    multiturn = bool(args.multiturn)
+    dataset = args.dataset or (MULTITURN_DATASET if multiturn else DEFAULT_DATASET)
     items = select_items(
-        load_dataset(args.dataset),
+        load_dataset(dataset),
         set(args.ids.split(",")) if args.ids else None,
         args.category,
+        multiturn,
     )
     tasks = []
-    for item in items:
-        turn = item["turns"][0]
-        tasks.append((item, "question", turn["question"]))
-        if args.paraphrases:
-            for i, p in enumerate(turn.get("paraphrases", []), start=1):
-                tasks.append((item, f"paraphrase_{i}", p))
+    if multiturn:
+        # 多轮按整段对话调度；对话内部的各轮必须按顺序回答
+        tasks = [(item, None, None) for item in items]
+    else:
+        for item in items:
+            turn = item["turns"][0]
+            tasks.append((item, "question", turn["question"]))
+            if args.paraphrases:
+                for i, p in enumerate(turn.get("paraphrases", []), start=1):
+                    tasks.append((item, f"paraphrase_{i}", p))
 
     # 消融开关直接改运行时配置，节点每次执行都会读取
     app_config.knowledge.enable_examples = not args.no_examples
@@ -260,25 +275,41 @@ async def run(args) -> int:
         es_client_manager.init()
         embedding_client_manager.init()
 
-    gold_cache: dict[str, list[dict]] = {}
+    gold_cache: dict = {}
     semaphore = asyncio.Semaphore(args.concurrency)
     done = 0
 
     async def worker(item, variant, question):
         nonlocal done
         async with semaphore:
+            if multiturn:
+                from evals.multiturn import evaluate_dialog
+
+                turns = await evaluate_dialog(
+                    item, args.predictor, args.multiturn, gold_cache
+                )
+                done += 1
+                marks = " ".join("✓" if t.passed else f"✗{t.stage}" for t in turns)
+                print(f"[{done}/{len(tasks)}] {item['id']} {marks}")
+                return turns
             r = await evaluate_case(item, variant, question, args.predictor, gold_cache)
             done += 1
             print(
                 f"[{done}/{len(tasks)}] {r.case_id}#{r.variant} {'✓' if r.passed else '✗ ' + r.stage}"
             )
-            return r
+            return [r]
 
     try:
-        # 先串行算出所有标准答案，避免并发时重复执行
+        # 先串行算出所有标准答案，避免并发时重复执行；多轮题按（题目, 轮次）缓存
         for item in items:
-            gold_cache[item["id"]] = await execute(item["turns"][0]["gold_sql"])
-        results = await asyncio.gather(*(worker(*t) for t in tasks))
+            if multiturn:
+                for t, turn in enumerate(item["turns"]):
+                    gold_cache[(item["id"], t)] = await execute(turn["gold_sql"])
+            else:
+                gold_cache[item["id"]] = await execute(item["turns"][0]["gold_sql"])
+        results = [
+            r for rs in await asyncio.gather(*(worker(*t) for t in tasks)) for r in rs
+        ]
     finally:
         await dw_mysql_client_manager.close()
         if args.predictor == "agent":
@@ -286,16 +317,18 @@ async def run(args) -> int:
             await qdrant_client_manager.close()
             await es_client_manager.close()
 
-    summary = summarize(results)
+    summary = summarize_dialogs(results) if multiturn else summarize(results)
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     meta = {
         "run_id": run_id,
         "predictor": args.predictor,
-        "dataset": str(args.dataset.resolve().relative_to(ROOT)),
+        "dataset": str(dataset.resolve().relative_to(ROOT)),
         "examples": app_config.knowledge.enable_examples,
         "semantic_check": app_config.agent.semantic_check,
         "llm_model": app_config.llm.model_name,
     }
+    if multiturn:
+        meta["mode"] = args.multiturn
     if cache:
         meta["llm_cache"] = {"hits": cache.hits, "misses": cache.misses}
 
@@ -317,7 +350,8 @@ async def run(args) -> int:
         json.dumps({"meta": meta, **summary}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    report = render_markdown(summary, results, meta, regression)
+    render = render_dialog_markdown if multiturn else render_markdown
+    report = render(summary, results, meta, regression)
     (out_dir / "summary.md").write_text(report, encoding="utf-8")
     if args.save_baseline and baseline_path:
         baseline_path.write_text(
@@ -333,9 +367,19 @@ async def run(args) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description="问数 Agent 评测 runner")
-    parser.add_argument("-d", "--dataset", type=Path, default=DEFAULT_DATASET)
+    parser.add_argument(
+        "-d",
+        "--dataset",
+        type=Path,
+        help="评测集，默认单轮用 traps.yaml、多轮用 multiturn.yaml",
+    )
     parser.add_argument(
         "--predictor", choices=["agent", "gold", "trap"], default="agent"
+    )
+    parser.add_argument(
+        "--multiturn",
+        choices=["teacher", "free"],
+        help="多轮评测：teacher 用标准答案作历史，free 用模型自己的历史",
     )
     parser.add_argument("--ids", help="只评测这些题，逗号分隔")
     parser.add_argument("--category", help="只评测某个类别")

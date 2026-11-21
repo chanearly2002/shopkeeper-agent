@@ -1,6 +1,7 @@
 /**
  * 前端应用主组件
  * 负责聊天会话状态、SSE 事件消费和整体页面布局
+ * 同一会话的请求都带上后端返回的 thread_id，追问由后端结合上文改写成独立问题
  */
 import {
   Activity,
@@ -8,6 +9,7 @@ import {
   Eraser,
   History,
   Leaf,
+  MessagesSquare,
   MessageSquarePlus,
   Server,
 } from "lucide-react";
@@ -51,6 +53,8 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [activeController, setActiveController] = useState<AbortController | null>(null);
+  // 当前会话 id：首轮由后端生成并通过 session 事件返回，之后的追问都带上它
+  const [threadId, setThreadId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const isStreaming = Boolean(activeController);
@@ -95,6 +99,11 @@ export default function App() {
     setMessages((current) => [...current, userMessage, assistantMessage]);
 
     const onEvent = (event: AgentEvent) => {
+      if (event.type === "session") {
+        setThreadId(event.thread_id);
+        return;
+      }
+
       setMessages((current) =>
         current.map((message) => {
           if (message.id !== assistantId) return message;
@@ -104,6 +113,17 @@ export default function App() {
               ...message,
               content: event.status === "running" ? `正在执行：${event.step}` : message.content,
               steps: upsertStep(message.steps, event),
+            };
+          }
+
+          if (event.type === "rewrite") {
+            // 改写结果与原话相同（首轮或新话题）时不展示，避免重复
+            const changed = event.standalone_question.trim() !== query;
+            return {
+              ...message,
+              rewrite: changed
+                ? { standaloneQuestion: event.standalone_question, intent: event.intent }
+                : undefined,
             };
           }
 
@@ -121,18 +141,23 @@ export default function App() {
             };
           }
 
-          return {
-            ...message,
-            status: "error",
-            content: "这次查询没有成功。",
-            error: event.message,
-          };
+          if (event.type === "error") {
+            return {
+              ...message,
+              status: "error",
+              content: "这次查询没有成功。",
+              error: event.message,
+            };
+          }
+
+          // 未知事件类型（后端新增而前端尚未支持）直接忽略，不当作错误
+          return message;
         }),
       );
     };
 
     try {
-      await streamQuery(query, { signal: controller.signal, onEvent });
+      await streamQuery(query, { threadId, signal: controller.signal, onEvent });
       setMessages((current) =>
         current.map((message) =>
           message.id === assistantId && message.status === "streaming"
@@ -167,6 +192,14 @@ export default function App() {
     if (isStreaming) return;
     setMessages([]);
     setDraft("");
+    // 开始新会话：下一次提问不带 thread_id，后端会新建会话，不再承接之前的上文
+    setThreadId(null);
+  };
+
+  // 改写有误时，把改写后的问题放回输入框，用户修改后作为完整问题重新提问
+  const correctRewrite = (standaloneQuestion: string) => {
+    if (isStreaming) return;
+    setDraft(standaloneQuestion);
   };
 
   return (
@@ -229,6 +262,15 @@ export default function App() {
                 </span>
                 <span className="truncate font-mono">{API_BASE_URL}</span>
               </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="inline-flex items-center gap-2">
+                  <MessagesSquare className="h-3.5 w-3.5" aria-hidden="true" />
+                  会话
+                </span>
+                <span className="truncate font-mono" title={threadId ?? undefined}>
+                  {threadId ? threadId.slice(0, 8) : "未开始"}
+                </span>
+              </div>
               <div className="flex items-center justify-between">
                 <span className="inline-flex items-center gap-2">
                   <Activity className="h-3.5 w-3.5" aria-hidden="true" />
@@ -271,7 +313,11 @@ export default function App() {
             ) : (
               <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 lg:px-8">
                 {messages.map((message) => (
-                  <MessageBubble key={message.id} message={message} />
+                  <MessageBubble
+                    key={message.id}
+                    message={message}
+                    onCorrectRewrite={isStreaming ? undefined : correctRewrite}
+                  />
                 ))}
               </div>
             )}

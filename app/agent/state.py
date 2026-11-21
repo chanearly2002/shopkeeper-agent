@@ -5,9 +5,14 @@ State 是 LangGraph 各节点之间传递和更新的共享数据
 本章在用户原始问题之外，新增关键词列表和三路召回结果
 并把召回到的实体整理成后续提示词更容易消费的表信息和指标信息
 SQL 生成闭环会继续写入候选 SQL 以及校验错误信息，用于控制校正或执行分支
+
+多轮问数在单轮流水线外面再套一层会话图（app/agent/session_graph.py），
+它的状态 SessionState 按 thread_id 持久化，只保存每轮的问题、改写、SQL 和结果预览；
+单轮的 DataAgentState 仍是一次性的，不进入检查点
 """
 
-from typing import NotRequired, TypedDict
+import operator
+from typing import Annotated, NotRequired, TypedDict
 
 from app.entities.column_info import ColumnInfo
 from app.entities.metric_info import MetricInfo
@@ -90,3 +95,41 @@ class DataAgentState(TypedDict):
 
     result: list[dict]  # 最终查询结果，最多 agent.max_result_rows 行
     truncated: bool  # 结果是否因超过行数上限被截断
+
+
+class ResultPreview(TypedDict):
+    """一轮查询结果的预览，供下一轮改写引用，控制 token 只保留前几行"""
+
+    columns: list[str]
+    row_count: int
+    truncated: bool
+    rows: list[dict]
+
+
+class Turn(TypedDict):
+    """会话中已完成的一轮问答"""
+
+    question: str  # 用户原话
+    standalone: str  # 改写后的独立问题，实际交给单轮流水线的问题
+    intent: str  # new / followup / result_qa，见 app/core/conversation.py
+    sql: str | None  # 最终执行的 SQL，失败时为 None
+    result_preview: ResultPreview | None  # 结果预览，失败时为 None
+    error: str | None  # 本轮失败原因
+    today: str  # 本轮使用的“今天”
+
+
+class SessionState(TypedDict):
+    """多轮会话状态，由外层会话图的 checkpointer 按 thread_id 持久化"""
+
+    user_input: str  # 本轮用户输入
+    # 会话的“今天”：首轮确定后整段会话沿用，请求里显式传入时覆盖
+    today: NotRequired[str]
+    # 历史轮次只追加不修改；reducer 让 remember 节点每轮只需返回新的一轮
+    history: Annotated[list[Turn], operator.add]
+
+    # 以下是“本轮”的数据，每轮都会被完整覆盖，不会串到下一轮
+    intent: str
+    standalone: str
+    sql: str | None
+    result_preview: ResultPreview | None
+    error: str | None
