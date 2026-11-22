@@ -12,29 +12,14 @@
 
 import argparse
 import asyncio
-import re
 import time
-from pathlib import Path
 
 from sqlalchemy import text
 
 from app.clients.mysql_client_manager import dw_mysql_client_manager
 from app.core.log import logger
 from app.scripts.dw_generator import DEFAULT_SEED, SCALES, generate
-
-DW_SQL = Path(__file__).parents[2] / "docker" / "mysql" / "dw.sql"
-
-
-def load_table_ddl() -> list[str]:
-    """从 dw.sql 中取出 DROP TABLE 和 CREATE TABLE 语句，跳过建库 授权等需要高权限的语句"""
-    # 去掉整行注释后按分号切分
-    content = "\n".join(
-        line
-        for line in DW_SQL.read_text(encoding="utf-8").splitlines()
-        if not line.strip().startswith("--")
-    )
-    statements = [s.strip() for s in content.split(";") if s.strip()]
-    return [s for s in statements if re.match(r"(DROP|CREATE)\s+TABLE", s, re.I)]
+from app.scripts.export_dw_sql import load_table_ddl
 
 
 async def write(scale: str, seed: int, batch_size: int = 2000):

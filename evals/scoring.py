@@ -5,6 +5,7 @@
 - attribute_failure：答错时判断第一个出错的环节（参考 Uber QueryGPT 按意图 选表 生成分别统计的做法）
 - summarize：按类别 难度 归因环节汇总准确率与成本
 - compare_with_baseline：与基线比较，判断是否退化（必过题失败、准确率下降、成本上升）
+- summarize_dialogs / render_dialog_markdown：多轮评测的汇总（意图准确率、轮次准确率、整段对话成功率）
 """
 
 from collections import Counter, defaultdict
@@ -13,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 # 失败环节，按流水线顺序排列；判断时命中第一个即停
 STAGE_PASS = "通过"
 STAGE_ERROR = "流程异常"
+STAGE_INTENT = "意图错误"  # 多轮：本轮意图判断错误（如把追问当成新问题）
 STAGE_RECALL = "召回遗漏"
 STAGE_FILTER = "过滤误删"
 STAGE_INVALID_SQL = "SQL不可执行"
@@ -224,4 +226,227 @@ def render_markdown(
             )
             note = (note or "").replace("|", "/").replace("\n", " ")[:120]
             lines.append(f"| {r.case_id} | {r.variant} | {r.stage} | {note} |")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# 多轮评测
+# ---------------------------------------------------------------------------
+
+# 多轮评测的两种模式
+MODE_TEACHER = "teacher"  # 历史用标准答案填充，测单轮追问能力，前一轮答错不连累后面
+MODE_FREE = "free"  # 用模型自己的历史，测整段对话的真实体验
+
+
+@dataclass
+class TurnResult(CaseResult):
+    """多轮对话中一轮的评测结果；variant 固定为 turn_<轮次>"""
+
+    turn: int = 1
+    gold_intent: str = "new"
+    intent: str | None = None  # 模型判断的意图；不经过改写环节时为 None
+    gold_standalone: str | None = None
+    standalone: str | None = None  # 模型改写后的问题
+
+    @property
+    def intent_correct(self) -> bool | None:
+        return None if self.intent is None else self.intent == self.gold_intent
+
+    def to_dict(self) -> dict:
+        return {**asdict(self), "intent_correct": self.intent_correct}
+
+
+def attribute_turn_failure(
+    *,
+    intent_correct: bool | None,
+    error: str | None,
+    sql: str | None,
+    recall_missing: list[str] | None,
+    filter_missing: list[str] | None,
+    sql_executable: bool,
+) -> str:
+    """多轮的一轮答错时，先看意图是否判断错，再按单轮流水线顺序归因"""
+    if error and not sql:
+        return STAGE_ERROR
+    if intent_correct is False:
+        return STAGE_INTENT
+    return attribute_failure(
+        error=error,
+        sql=sql,
+        recall_missing=recall_missing,
+        filter_missing=filter_missing,
+        sql_executable=sql_executable,
+    )
+
+
+def summarize_dialogs(results: list[TurnResult]) -> dict:
+    """
+    汇总多轮评测
+
+    - accuracy：全部轮次的执行准确率（与单轮汇总同名，便于复用基线比较）
+    - followup_accuracy：只看第 2 轮及以后，衡量追问能力
+    - intent_accuracy：第 2 轮及以后意图判断正确的比例（首轮意图固定为 new，不计入）
+    - dialog_success_rate：整段对话每一轮都答对的比例
+    """
+    total = len(results)
+    passed = sum(r.passed for r in results)
+    followups = [r for r in results if r.turn > 1]
+    judged = [r for r in followups if r.intent is not None]
+
+    dialogs: dict[str, list[TurnResult]] = defaultdict(list)
+    for r in results:
+        dialogs[r.case_id].append(r)
+    dialog_ok = {cid: all(t.passed for t in turns) for cid, turns in dialogs.items()}
+
+    by_category: dict[str, dict] = {}
+    for cid, turns in sorted(dialogs.items()):
+        bucket = by_category.setdefault(
+            turns[0].category,
+            {"dialogs": 0, "success": 0, "followups": 0, "followups_passed": 0},
+        )
+        bucket["dialogs"] += 1
+        bucket["success"] += dialog_ok[cid]
+        bucket["followups"] += sum(t.turn > 1 for t in turns)
+        bucket["followups_passed"] += sum(t.turn > 1 and t.passed for t in turns)
+    for bucket in by_category.values():
+        bucket["dialog_success_rate"] = _rate(bucket["success"], bucket["dialogs"])
+        bucket["followup_accuracy"] = _rate(
+            bucket["followups_passed"], bucket["followups"]
+        )
+
+    confusion = Counter(
+        f"{r.gold_intent}→{r.intent}" for r in judged if r.intent != r.gold_intent
+    )
+    failures = [r for r in results if not r.passed]
+    return {
+        "total": total,
+        "passed": passed,
+        "accuracy": _rate(passed, total),
+        "followup_total": len(followups),
+        "followup_passed": sum(r.passed for r in followups),
+        "followup_accuracy": _rate(sum(r.passed for r in followups), len(followups)),
+        "intent_total": len(judged),
+        "intent_accuracy": _rate(
+            sum(bool(r.intent_correct) for r in judged), len(judged)
+        )
+        if judged
+        else None,
+        "intent_confusion": dict(confusion.most_common()),
+        "dialogs": len(dialogs),
+        "dialog_success": sum(dialog_ok.values()),
+        "dialog_success_rate": _rate(sum(dialog_ok.values()), len(dialogs)),
+        "must_pass_failed": sorted(
+            {r.case_id for r in results if r.must_pass and not dialog_ok[r.case_id]}
+        ),
+        "by_category": by_category,
+        "failure_stages": dict(Counter(r.stage for r in failures).most_common()),
+        "avg_llm_calls": round(sum(r.llm_calls for r in results) / total, 2)
+        if total
+        else 0,
+        "avg_tokens": round(sum(r.tokens for r in results) / total, 1) if total else 0,
+        "avg_seconds": round(sum(r.seconds for r in results) / total, 2)
+        if total
+        else 0,
+        "lint_flagged": sum(bool(r.lint_issues) for r in results),
+        "per_case": {f"{r.case_id}#{r.turn}": r.passed for r in results},
+    }
+
+
+def render_dialog_markdown(
+    summary: dict,
+    results: list[TurnResult],
+    meta: dict,
+    regression: RegressionReport | None = None,
+) -> str:
+    """生成多轮评测的 Markdown 报告"""
+    mode = meta.get("mode")
+    mode_text = {
+        MODE_TEACHER: "teacher forcing（历史用标准答案填充）",
+        MODE_FREE: "自由对话（使用模型自己的历史）",
+    }.get(mode, str(mode))
+    intent = summary["intent_accuracy"]
+    lines = [
+        f"# 多轮评测报告 {meta['run_id']}",
+        "",
+        f"- 答题方式：`{meta['predictor']}`；模式：{mode_text}；评测集：`{meta['dataset']}`",
+        f"- **整段对话成功率：{summary['dialog_success_rate']:.1%}**（{summary['dialog_success']}/{summary['dialogs']}）",
+        f"- **追问轮准确率：{summary['followup_accuracy']:.1%}**（{summary['followup_passed']}/{summary['followup_total']}）；"
+        f"全部轮次准确率 {summary['accuracy']:.1%}（{summary['passed']}/{summary['total']}）",
+        "- 意图准确率："
+        + (
+            f"{intent:.1%}（{summary['intent_total']} 个追问轮）"
+            if intent is not None
+            else "未评估（答题方式不经过改写环节）"
+        ),
+        f"- 必过对话失败：{', '.join(summary['must_pass_failed']) or '无'}",
+        f"- 每轮平均 LLM 调用 {summary['avg_llm_calls']} 次、{summary['avg_tokens']} tokens、耗时 {summary['avg_seconds']} 秒",
+        "",
+    ]
+    if mode == MODE_TEACHER:
+        lines += [
+            "> teacher forcing 下每一轮都基于标准历史作答，整段对话成功率只说明“每一轮单独都答对”，"
+            "真实体验以自由对话模式为准",
+            "",
+        ]
+    if summary["intent_confusion"]:
+        lines += ["## 意图混淆", "", "| 标准 → 预测 | 次数 |", "| --- | --- |"]
+        lines += [f"| {k} | {v} |" for k, v in summary["intent_confusion"].items()]
+        lines.append("")
+    if regression is not None:
+        lines += [
+            "## 与基线比较",
+            "",
+            f"- 结论：{'**退化**' if regression.regressed else '未退化'}",
+        ]
+        lines += [f"- {r}" for r in regression.reasons]
+        lines += [
+            f"- 由对变错：{', '.join(regression.newly_failed) or '无'}",
+            f"- 由错变对：{', '.join(regression.newly_passed) or '无'}",
+            "",
+        ]
+    lines += [
+        "## 分类别",
+        "",
+        "| 类别 | 对话数 | 整段成功 | 追问轮准确率 |",
+        "| --- | --- | --- | --- |",
+    ]
+    lines += [
+        f"| {k} | {v['dialogs']} | {v['success']}（{v['dialog_success_rate']:.0%}） | "
+        f"{v['followups_passed']}/{v['followups']}（{v['followup_accuracy']:.0%}） |"
+        for k, v in summary["by_category"].items()
+    ]
+    lines += ["", "## 失败环节分布", "", "| 环节 | 轮数 |", "| --- | --- |"]
+    lines += [f"| {k} | {v} |" for k, v in summary["failure_stages"].items()] or [
+        "| 无 | 0 |"
+    ]
+    failed = [r for r in results if not r.passed]
+    if failed:
+        lines += [
+            "",
+            "## 失败明细",
+            "",
+            "| 对话 | 轮次 | 环节 | 意图（标准/预测） | 改写（预测 / 标准） | 说明 |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for r in failed:
+            note = (
+                r.error
+                or "; ".join((r.recall_missing or []) + (r.filter_missing or []))
+                or "; ".join(r.lint_issues)
+            )
+            rewrite = (
+                f"{r.standalone} / {r.gold_standalone}"
+                if r.standalone is not None and r.turn > 1
+                else ""
+            )
+            cells = [
+                r.case_id,
+                str(r.turn),
+                r.stage,
+                f"{r.gold_intent}/{r.intent or '-'}",
+                rewrite,
+                note or "",
+            ]
+            cells = [c.replace("|", "/").replace("\n", " ")[:120] for c in cells]
+            lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"

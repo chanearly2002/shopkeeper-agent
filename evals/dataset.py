@@ -17,10 +17,12 @@ from omegaconf import OmegaConf
 from sqlglot import exp
 
 from app.conf.meta_config import MetaConfig
+from app.core.conversation import INTENT_NEW, INTENTS
 from app.core.sql_safety import ensure_readonly
 
 ROOT = Path(__file__).parents[1]
 DEFAULT_DATASET = ROOT / "evals" / "datasets" / "traps.yaml"
+MULTITURN_DATASET = ROOT / "evals" / "datasets" / "multiturn.yaml"
 EXAMPLES_FILE = ROOT / "conf" / "sql_examples.yaml"
 # 示例与评测题的问题文本相似度超过该值视为泄漏
 LEAKAGE_THRESHOLD = 0.8
@@ -35,6 +37,8 @@ REQUIRED_TURN_FIELDS = (
     "expect",
     "order_matters",
 )
+# 多轮题第 2 轮起额外要求的字段：期望意图和期望的改写结果
+FOLLOWUP_TURN_FIELDS = ("gold_intent", "gold_standalone")
 
 
 def load_dataset(path: Path) -> list[dict]:
@@ -78,6 +82,7 @@ def check_structure(items: list[dict], per_category: int | None) -> list[str]:
             for key in REQUIRED_TURN_FIELDS:
                 if key not in turn:
                     errors.append(f"{where}: 缺少字段 {key}")
+            errors += _check_intent(turn, t, where)
             if "gold_sql" not in turn:
                 continue
             expect = turn.get("expect") or {}
@@ -96,6 +101,25 @@ def check_structure(items: list[dict], per_category: int | None) -> list[str]:
                     ensure_readonly(turn.get(key, ""))
                 except ValueError as e:
                     errors.append(f"{where}: {key} 未通过只读校验：{e}")
+    return errors
+
+
+def _check_intent(turn: dict, index: int, where: str) -> list[str]:
+    """多轮题的意图标注：首轮只能是 new；追问轮必须标注意图和改写结果"""
+    errors = []
+    if index == 0:
+        if turn.get("gold_intent", INTENT_NEW) != INTENT_NEW:
+            errors.append(f"{where}: 首轮没有上文，gold_intent 只能是 {INTENT_NEW}")
+        return errors
+    for key in FOLLOWUP_TURN_FIELDS:
+        if not turn.get(key):
+            errors.append(f"{where}: 追问轮缺少字段 {key}")
+    if turn.get("gold_intent") and turn["gold_intent"] not in INTENTS:
+        errors.append(f"{where}: gold_intent 必须是 {INTENTS} 之一")
+    if turn.get("gold_intent") == INTENT_NEW and turn.get(
+        "gold_standalone"
+    ) != turn.get("question"):
+        errors.append(f"{where}: 新话题的 gold_standalone 应与原问题完全一致")
     return errors
 
 
@@ -121,7 +145,11 @@ def check_leakage(items: list[dict], examples: list[dict]) -> list[str]:
     errors: list[str] = []
     for item in items:
         for turn in item.get("turns", []):
-            questions = [turn.get("question", ""), *turn.get("paraphrases", [])]
+            questions = [
+                turn.get("question", ""),
+                *turn.get("paraphrases", []),
+                *([turn["gold_standalone"]] if turn.get("gold_standalone") else []),
+            ]
             for i, example in enumerate(examples, start=1):
                 for q in questions:
                     ratio = SequenceMatcher(

@@ -1,12 +1,14 @@
 /**
  * 智能体接口客户端
- * 封装后端 /api/query SSE 流式接口请求与事件解析逻辑
+ * 封装后端 /api/query SSE 流式接口请求与事件解析逻辑，请求带上会话 id 以支持多轮追问
  */
 import type { AgentEvent } from "../types/agent";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
 
 type QueryOptions = {
+  /** 会话 id；不传时后端新建会话，并在第一条 session 事件中返回 */
+  threadId?: string | null;
   signal?: AbortSignal;
   onEvent: (event: AgentEvent) => void;
 };
@@ -18,7 +20,7 @@ export async function streamQuery(query: string, options: QueryOptions) {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify(options.threadId ? { query, thread_id: options.threadId } : { query }),
     signal: options.signal,
   });
 

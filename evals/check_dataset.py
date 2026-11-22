@@ -11,6 +11,7 @@
 用法：
     uv run python -m evals.check_dataset                      # 默认检查 evals/datasets/traps.yaml
     uv run python -m evals.check_dataset -d evals/datasets/xxx.yaml --per-category 5
+    uv run python -m evals.check_dataset -d evals/datasets/multiturn.yaml --per-category 0   # 多轮题，每一轮都检查
 数据生成器或数据规模变化后都应重新运行；任何一题不通过时以非 0 退出
 """
 
@@ -80,7 +81,9 @@ async def check_results(items: list[dict]) -> tuple[list[str], list[tuple]]:
                         )
                     report.append(
                         (
-                            item["id"],
+                            item["id"]
+                            if len(item["turns"]) == 1
+                            else f"{item['id']}#{t + 1}",
                             len(gold),
                             _preview(gold),
                             _preview(trap),
@@ -144,9 +147,9 @@ async def main(path: Path, per_category: int | None) -> int:
     result_errors, report = await check_results(items)
     errors += result_errors
 
-    print(f"{'题目':<22}{'行数':>5}  {'标准答案':<36}{'错误写法':<36}可区分")
+    print(f"{'题目':<24}{'行数':>5}  {'标准答案':<36}{'错误写法':<36}可区分")
     for qid, n, gold, trap, ok in report:
-        print(f"{qid:<22}{n:>5}  {gold[:34]:<36}{trap[:34]:<36}{'是' if ok else '否'}")
+        print(f"{qid:<24}{n:>5}  {gold[:34]:<36}{trap[:34]:<36}{'是' if ok else '否'}")
     categories = Counter(item["category"] for item in items)
     print(f"\n共 {len(items)} 题，{len(categories)} 个类别：{dict(categories)}")
     if errors:
