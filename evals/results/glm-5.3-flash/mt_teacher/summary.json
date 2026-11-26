@@ -1,0 +1,149 @@
+{
+  "meta": {
+    "run_id": "20261126-143225",
+    "predictor": "agent",
+    "dataset": "evals/datasets/multiturn.yaml",
+    "examples": true,
+    "semantic_check": true,
+    "llm_model": "glm-5.3-flash",
+    "mode": "teacher",
+    "llm_cache": {
+      "hits": 210,
+      "misses": 94
+    }
+  },
+  "total": 48,
+  "passed": 45,
+  "accuracy": 0.9375,
+  "answered_turns": 2,
+  "clarify_turns": 2,
+  "followup_total": 26,
+  "followup_passed": 24,
+  "followup_accuracy": 0.9231,
+  "intent_total": 26,
+  "intent_accuracy": 0.9231,
+  "intent_confusion": {
+    "followup→clarify": 1,
+    "clarify→followup": 1
+  },
+  "dialogs": 22,
+  "dialog_success": 19,
+  "dialog_success_rate": 0.8636,
+  "must_pass_failed": [],
+  "by_category": {
+    "add_filter": {
+      "dialogs": 4,
+      "success": 4,
+      "followups": 4,
+      "followups_passed": 4,
+      "dialog_success_rate": 1.0,
+      "followup_accuracy": 1.0
+    },
+    "change_dim": {
+      "dialogs": 4,
+      "success": 4,
+      "followups": 5,
+      "followups_passed": 5,
+      "dialog_success_rate": 1.0,
+      "followup_accuracy": 1.0
+    },
+    "clarify": {
+      "dialogs": 2,
+      "success": 0,
+      "followups": 2,
+      "followups_passed": 0,
+      "dialog_success_rate": 0.0,
+      "followup_accuracy": 0.0
+    },
+    "correction": {
+      "dialogs": 3,
+      "success": 3,
+      "followups": 3,
+      "followups_passed": 3,
+      "dialog_success_rate": 1.0,
+      "followup_accuracy": 1.0
+    },
+    "ellipsis": {
+      "dialogs": 4,
+      "success": 4,
+      "followups": 6,
+      "followups_passed": 6,
+      "dialog_success_rate": 1.0,
+      "followup_accuracy": 1.0
+    },
+    "result_ref": {
+      "dialogs": 3,
+      "success": 2,
+      "followups": 4,
+      "followups_passed": 4,
+      "dialog_success_rate": 0.6667,
+      "followup_accuracy": 1.0
+    },
+    "topic_switch": {
+      "dialogs": 2,
+      "success": 2,
+      "followups": 2,
+      "followups_passed": 2,
+      "dialog_success_rate": 1.0,
+      "followup_accuracy": 1.0
+    }
+  },
+  "failure_stages": {
+    "流程异常": 2,
+    "意图错误": 1
+  },
+  "avg_llm_calls": 6.33,
+  "avg_tokens": 17917.5,
+  "avg_seconds": 27.81,
+  "lint_flagged": 0,
+  "per_case": {
+    "mt_ellipsis_01#1": true,
+    "mt_ellipsis_01#2": true,
+    "mt_ellipsis_01#3": true,
+    "mt_ellipsis_02#1": true,
+    "mt_ellipsis_02#2": true,
+    "mt_ellipsis_03#1": true,
+    "mt_ellipsis_03#2": true,
+    "mt_ellipsis_03#3": true,
+    "mt_ellipsis_04#1": true,
+    "mt_ellipsis_04#2": true,
+    "mt_add_filter_01#1": true,
+    "mt_add_filter_01#2": true,
+    "mt_add_filter_02#1": true,
+    "mt_add_filter_02#2": true,
+    "mt_add_filter_03#1": true,
+    "mt_add_filter_03#2": true,
+    "mt_add_filter_04#1": true,
+    "mt_add_filter_04#2": true,
+    "mt_change_dim_01#1": true,
+    "mt_change_dim_01#2": true,
+    "mt_change_dim_01#3": true,
+    "mt_change_dim_02#1": true,
+    "mt_change_dim_02#2": true,
+    "mt_change_dim_03#1": true,
+    "mt_change_dim_03#2": true,
+    "mt_change_dim_04#1": true,
+    "mt_change_dim_04#2": true,
+    "mt_result_ref_01#1": true,
+    "mt_result_ref_01#2": true,
+    "mt_result_ref_01#3": true,
+    "mt_result_ref_02#1": true,
+    "mt_result_ref_02#2": true,
+    "mt_result_ref_03#1": false,
+    "mt_result_ref_03#2": true,
+    "mt_correction_01#1": true,
+    "mt_correction_01#2": true,
+    "mt_correction_02#1": true,
+    "mt_correction_02#2": true,
+    "mt_correction_03#1": true,
+    "mt_correction_03#2": true,
+    "mt_topic_switch_01#1": true,
+    "mt_topic_switch_01#2": true,
+    "mt_topic_switch_02#1": true,
+    "mt_topic_switch_02#2": true,
+    "mt_clarify_01#1": true,
+    "mt_clarify_01#2": false,
+    "mt_clarify_02#1": true,
+    "mt_clarify_02#2": false
+  }
+}
