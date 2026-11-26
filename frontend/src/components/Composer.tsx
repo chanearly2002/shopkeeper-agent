@@ -13,6 +13,8 @@ type ComposerProps = {
     onChange: (value: string) => void;
     onSubmit: () => void;
     onStop: () => void;
+    /** 输入框提示，例如有待回答的反问时提示“回答上面的问题” */
+    placeholder?: string;
 };
 
 export function Composer({
@@ -22,6 +24,7 @@ export function Composer({
     onChange,
     onSubmit,
     onStop,
+    placeholder = "问一个电商数据问题...",
 }: ComposerProps) {
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -52,7 +55,7 @@ export function Composer({
                     onChange={(event) => onChange(event.target.value)}
                     onKeyDown={onKeyDown}
                     rows={1}
-                    placeholder="问一个电商数据问题..."
+                    placeholder={placeholder}
                     className="max-h-36 min-h-11 flex-1 resize-none bg-transparent px-2 py-3 text-[15px] leading-6 text-ink outline-none placeholder:text-ink/35"
                 />
                 <button

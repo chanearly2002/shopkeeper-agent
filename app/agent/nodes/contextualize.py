@@ -2,9 +2,14 @@
 追问理解节点（多轮会话图的入口）
 
 借鉴 Snowflake Cortex Analyst 的多轮方案：先把用户的追问改写成独立完整的问题，
-后面的单轮问数流水线完全不动。同时判断意图（new / followup / result_qa），
+后面的单轮问数流水线完全不动。同时判断意图（new / followup / result_qa / clarify），
 并把改写结果作为 rewrite 事件推给前端展示“我理解为：……”
-首轮没有上文，直接跳过 LLM 调用，单轮问数的成本和效果不受影响
+
+- 首轮没有上文，默认跳过 LLM 调用，单轮问数的成本和效果不受影响
+  （conversation.contextualize_first_turn 打开后，首轮也会改写，从而能对首轮问题反问）
+- clarify：信息不足时由 ask_clarification 反问用户，用户回答后带着“（补充：……）”回到这里重新改写；
+  每轮最多反问一次
+- 每轮开头清空“本轮”字段，保证后面任何分支都不会读到上一轮的 SQL、回答或反问
 """
 
 from datetime import date
@@ -17,7 +22,14 @@ from app.agent.context import DataAgentContext
 from app.agent.llm import llm
 from app.agent.state import SessionState
 from app.conf.app_config import app_config
-from app.core.conversation import INTENT_NEW, format_history, parse_rewrite
+from app.core.conversation import (
+    INTENT_CLARIFY,
+    INTENT_NEW,
+    Rewrite,
+    format_history,
+    merge_clarification,
+    parse_rewrite,
+)
 from app.core.log import logger
 from app.prompt.prompt_loader import load_prompt
 
@@ -34,13 +46,19 @@ async def contextualize(state: SessionState, runtime: Runtime[DataAgentContext])
     step = "理解问题"
     writer({"type": "progress", "step": step, "status": "running"})
 
-    user_input = state["user_input"].strip()
     history = state.get("history") or []
-    today = resolve_today(state)
+    clarified = bool(state.get("clarified"))
+    # 用户回答过反问时，把回答拼在原话后面一起交给模型改写
+    user_input = state["user_input"].strip()
+    if clarified and state.get("clarification"):
+        user_input = merge_clarification(user_input, state["clarification"])
+    conf = app_config.conversation
+    # 反问过一次就不再反问；功能关闭时也不反问
+    allow_clarify = conf.enable_clarify and not clarified
 
-    if not history:
+    if not history and not clarified and not conf.contextualize_first_turn:
         # 首轮没有上文可依赖，原样作为新问题
-        intent, standalone = INTENT_NEW, user_input
+        rewrite = Rewrite(INTENT_NEW, user_input)
         writer({"type": "progress", "step": step, "status": "success"})
     else:
         try:
@@ -51,18 +69,18 @@ async def contextualize(state: SessionState, runtime: Runtime[DataAgentContext])
             chain = prompt | llm | JsonOutputParser()
             output = await chain.ainvoke(
                 {
-                    "history": format_history(
-                        history, app_config.conversation.history_turns
-                    ),
+                    "history": format_history(history, conf.history_turns)
+                    if history
+                    else "无",
                     "question": user_input,
                 }
             )
-            intent, standalone = parse_rewrite(output, user_input)
+            rewrite = parse_rewrite(output, user_input, allow_clarify)
             writer({"type": "progress", "step": step, "status": "success"})
         except Exception as e:
             # 改写只是锦上添花：失败时退回“按原话当作新问题”，不让整轮问数中断
             logger.error(f"{step} failed，按原问题处理：{e}")
-            intent, standalone = INTENT_NEW, user_input
+            rewrite = Rewrite(INTENT_NEW, user_input)
             writer(
                 {
                     "type": "progress",
@@ -72,6 +90,25 @@ async def contextualize(state: SessionState, runtime: Runtime[DataAgentContext])
                 }
             )
 
-    logger.info(f"本轮意图：{intent}，改写后的问题：{standalone}")
-    writer({"type": "rewrite", "standalone_question": standalone, "intent": intent})
-    return {"intent": intent, "standalone": standalone, "today": today}
+    logger.info(f"本轮意图：{rewrite.intent}，改写后的问题：{rewrite.standalone}")
+    if rewrite.intent != INTENT_CLARIFY:
+        # 要反问时还没有确定的问题，等用户回答后再发 rewrite
+        writer(
+            {
+                "type": "rewrite",
+                "standalone_question": rewrite.standalone,
+                "intent": rewrite.intent,
+            }
+        )
+    return {
+        "intent": rewrite.intent,
+        "standalone": rewrite.standalone,
+        "clarify_question": rewrite.clarify_question,
+        "clarify_options": rewrite.options,
+        "today": resolve_today(state),
+        # 清空本轮的输出字段，后面的分支各自写入
+        "sql": None,
+        "result_preview": None,
+        "error": None,
+        "answer": None,
+    }

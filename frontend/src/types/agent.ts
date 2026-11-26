@@ -33,8 +33,8 @@ export type SessionEvent = {
   thread_id: string;
 };
 
-/** new：与上文无关的新问题；followup：结合上文的追问；result_qa：针对上一轮结果的提问 */
-export type Intent = "new" | "followup" | "result_qa";
+/** new：与上文无关的新问题；followup：结合上文的追问；result_qa：针对上一轮结果的提问；clarify：需要先反问 */
+export type Intent = "new" | "followup" | "result_qa" | "clarify";
 
 /** 追问改写结果：后端实际查询的独立问题 */
 export type RewriteEvent = {
@@ -43,7 +43,27 @@ export type RewriteEvent = {
   intent: Intent;
 };
 
-export type AgentEvent = ProgressEvent | ResultEvent | ErrorEvent | SessionEvent | RewriteEvent;
+/** 信息不足时的反问：回答时把选项或自己写的内容作为 resume 发回，会话从暂停处继续 */
+export type ClarifyEvent = {
+  type: "clarify";
+  question: string;
+  options: string[];
+};
+
+/** 针对上一轮结果的提问，直接基于结果给出的文字回答（不查库） */
+export type AnswerEvent = {
+  type: "answer";
+  text: string;
+};
+
+export type AgentEvent =
+  | ProgressEvent
+  | ResultEvent
+  | ErrorEvent
+  | SessionEvent
+  | RewriteEvent
+  | ClarifyEvent
+  | AnswerEvent;
 
 export type StepState = {
   step: string;
@@ -73,6 +93,8 @@ export type ChatMessage = {
   status?: "streaming" | "done" | "error";
   /** 结合上文改写后的问题；只在与用户原话不同时展示 */
   rewrite?: Rewrite;
+  /** 后端的反问；answered 表示已经回答或跳过，选项按钮不再可点 */
+  clarify?: { question: string; options: string[]; answered?: boolean };
   steps?: StepState[];
   result?: unknown;
   resultMeta?: ResultMeta;

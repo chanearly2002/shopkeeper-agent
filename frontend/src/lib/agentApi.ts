@@ -9,6 +9,8 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? ""
 type QueryOptions = {
   /** 会话 id；不传时后端新建会话，并在第一条 session 事件中返回 */
   threadId?: string | null;
+  /** 回答上一条反问时传入，后端从暂停处继续，而不是开始新的一轮 */
+  resume?: string;
   signal?: AbortSignal;
   onEvent: (event: AgentEvent) => void;
 };
@@ -20,7 +22,11 @@ export async function streamQuery(query: string, options: QueryOptions) {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     },
-    body: JSON.stringify(options.threadId ? { query, thread_id: options.threadId } : { query }),
+    body: JSON.stringify({
+      query,
+      ...(options.threadId ? { thread_id: options.threadId } : {}),
+      ...(options.resume !== undefined ? { resume: options.resume } : {}),
+    }),
     signal: options.signal,
   });
 
