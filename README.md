@@ -302,7 +302,10 @@ uv run python -m evals.runner --multiturn teacher   # 多轮追问评测（free 
 cd frontend && pnpm lint    # 前端类型检查
 ```
 
-`notebooks/dw_explore.ipynb` 用来探查数仓：表与字段、指标口径速算、对账与外键自检、常见分析写法。依赖不在默认安装里，先运行 `uv sync --group notebook`。
+`notebooks/` 下有两本 notebook，依赖不在默认安装里，先运行 `uv sync --group notebook`：
+
+- `dw_explore.ipynb`：探查数仓，包括表与字段、指标口径速算、对账与外键自检、常见分析写法
+- `eval_tutorial.ipynb`：评测教程，讲评测的思路、判分规则、归因和回归门禁，并解读 `evals/results/glm-5.3-flash/` 里的真实评测结果
 
 架构说明、开发约定和已知问题见 [CLAUDE.md](CLAUDE.md)。
 
