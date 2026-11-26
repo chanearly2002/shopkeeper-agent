@@ -48,8 +48,9 @@ async def recall_value(state: DataAgentState, runtime: Runtime[DataAgentContext]
 
         result = await chain.ainvoke({"query": query})
 
-        # 通用关键词和字段值扩展词一起检索 ES，尽量提高真实取值召回率
-        keywords = set(keywords + result)
+        # 通用关键词和字段值扩展词一起检索 ES，尽量提高真实取值召回率；
+        # 保序去重，保证每次运行的检索顺序一致（set 的顺序不固定，会让提示词变化、评测不可复现）
+        keywords = list(dict.fromkeys(keywords + result))
 
         # 各检索词互不依赖，并发查询 ES
         search_results: list[list[ValueInfo]] = await asyncio.gather(

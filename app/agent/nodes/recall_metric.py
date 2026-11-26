@@ -48,11 +48,11 @@ async def recall_metric(state: DataAgentState, runtime: Runtime[DataAgentContext
 
         result = await chain.ainvoke({"query": query})
 
-        # 通用关键词和指标扩展词都参与召回，提升同义指标的命中率
-        keywords = set(keywords + result)
+        # 通用关键词和指标扩展词都参与召回，提升同义指标的命中率；
+        # 保序去重，保证每次运行的检索顺序一致（set 的顺序不固定，会让提示词变化、评测不可复现）
+        keywords = list(dict.fromkeys(keywords + result))
 
         # 所有检索词一次批量向量化，再并发检索，避免逐词串行等待网络往返
-        keywords = list(keywords)
         embeddings = await embedding_client.aembed_documents(keywords)
         search_results: list[list[MetricInfo]] = await asyncio.gather(
             *(metric_qdrant_repository.search(embedding) for embedding in embeddings)
