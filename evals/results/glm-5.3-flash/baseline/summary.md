@@ -1,10 +1,10 @@
-# 评测报告 20261126-133122
+# 评测报告 20261126-141202
 
 - 答题方式：`agent`；评测集：`evals/datasets/traps.yaml`；题目数：100
 - 配置：few-shot 示例 开；SQL 语义检查 开
-- **准确率：89.0%**（89/100）
+- **准确率：91.0%**（91/100）
 - 必过题失败：activity_01
-- 平均 LLM 调用 6.05 次、19518.5 tokens、耗时 105.27 秒；最终 SQL 仍有语义检查提示的题 1 道
+- 平均 LLM 调用 6.05 次、19577.9 tokens、耗时 17.12 秒；最终 SQL 仍有语义检查提示的题 1 道
 
 ## 分类别
 
@@ -15,7 +15,7 @@
 | distinct | 10 | 10 | 100% |
 | fanout | 10 | 8 | 80% |
 | funnel | 10 | 9 | 90% |
-| order_vs_pay | 10 | 8 | 80% |
+| order_vs_pay | 10 | 10 | 100% |
 | refund | 10 | 10 | 100% |
 | region_role | 10 | 10 | 100% |
 | relative_time | 10 | 7 | 70% |
@@ -26,7 +26,6 @@
 | 环节 | 题数 |
 | --- | --- |
 | 结果不符 | 6 |
-| 召回遗漏 | 2 |
 | 过滤误删 | 2 |
 | 流程异常 | 1 |
 
@@ -34,8 +33,6 @@
 
 | 题目 | 问法 | 环节 | 说明 |
 | --- | --- | --- | --- |
-| order_vs_pay_02 | question | 召回遗漏 | tables:dim_date; tables:dim_date |
-| order_vs_pay_02 | paraphrase_1 | 召回遗漏 | tables:dim_date; tables:dim_date |
 | fanout_04 | question | 结果不符 |  |
 | fanout_04 | paraphrase_1 | 结果不符 |  |
 | snowflake_03 | paraphrase_1 | 结果不符 |  |

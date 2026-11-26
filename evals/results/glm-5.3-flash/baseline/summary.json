@@ -1,19 +1,19 @@
 {
   "meta": {
-    "run_id": "20261126-133122",
+    "run_id": "20261126-141202",
     "predictor": "agent",
     "dataset": "evals/datasets/traps.yaml",
     "examples": true,
     "semantic_check": true,
     "llm_model": "glm-5.3-flash",
     "llm_cache": {
-      "hits": 0,
-      "misses": 605
+      "hits": 589,
+      "misses": 16
     }
   },
   "total": 100,
-  "passed": 89,
-  "accuracy": 0.89,
+  "passed": 91,
+  "accuracy": 0.91,
   "must_pass_failed": [
     "activity_01"
   ],
@@ -45,8 +45,8 @@
     },
     "order_vs_pay": {
       "total": 10,
-      "passed": 8,
-      "accuracy": 0.8
+      "passed": 10,
+      "accuracy": 1.0
     },
     "refund": {
       "total": 10,
@@ -72,8 +72,8 @@
   "by_difficulty": {
     "easy": {
       "total": 18,
-      "passed": 15,
-      "accuracy": 0.8333
+      "passed": 17,
+      "accuracy": 0.9444
     },
     "hard": {
       "total": 28,
@@ -88,19 +88,18 @@
   },
   "failure_stages": {
     "结果不符": 6,
-    "召回遗漏": 2,
     "过滤误删": 2,
     "流程异常": 1
   },
   "avg_llm_calls": 6.05,
-  "avg_tokens": 19518.5,
-  "avg_seconds": 105.27,
+  "avg_tokens": 19577.9,
+  "avg_seconds": 17.12,
   "lint_flagged": 1,
   "per_case": {
     "order_vs_pay_01#question": true,
     "order_vs_pay_01#paraphrase_1": true,
-    "order_vs_pay_02#question": false,
-    "order_vs_pay_02#paraphrase_1": false,
+    "order_vs_pay_02#question": true,
+    "order_vs_pay_02#paraphrase_1": true,
     "order_vs_pay_03#question": true,
     "order_vs_pay_03#paraphrase_1": true,
     "order_vs_pay_04#question": true,
