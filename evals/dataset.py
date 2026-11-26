@@ -17,7 +17,12 @@ from omegaconf import OmegaConf
 from sqlglot import exp
 
 from app.conf.meta_config import MetaConfig
-from app.core.conversation import INTENT_NEW, INTENTS
+from app.core.conversation import (
+    INTENT_CLARIFY,
+    INTENT_NEW,
+    INTENT_RESULT_QA,
+    INTENTS,
+)
 from app.core.sql_safety import ensure_readonly
 
 ROOT = Path(__file__).parents[1]
@@ -105,8 +110,19 @@ def check_structure(items: list[dict], per_category: int | None) -> list[str]:
 
 
 def _check_intent(turn: dict, index: int, where: str) -> list[str]:
-    """多轮题的意图标注：首轮只能是 new；追问轮必须标注意图和改写结果"""
+    """
+    多轮题的意图标注：首轮只能是 new；追问轮必须标注意图和改写结果；
+    反问轮要有模拟用户的回答 clarify_reply；gold_answer_contains 只用于结果追问轮
+    """
     errors = []
+    contains = turn.get("gold_answer_contains")
+    if contains is not None:
+        if turn.get("gold_intent") != INTENT_RESULT_QA:
+            errors.append(f"{where}: gold_answer_contains 只用于 result_qa 轮")
+        if not contains or not all(isinstance(c, str) and c for c in contains):
+            errors.append(f"{where}: gold_answer_contains 必须是非空字符串列表")
+    if turn.get("gold_intent") == INTENT_CLARIFY and not turn.get("clarify_reply"):
+        errors.append(f"{where}: clarify 轮缺少模拟用户回答 clarify_reply")
     if index == 0:
         if turn.get("gold_intent", INTENT_NEW) != INTENT_NEW:
             errors.append(f"{where}: 首轮没有上文，gold_intent 只能是 {INTENT_NEW}")

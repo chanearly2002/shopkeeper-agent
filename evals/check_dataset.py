@@ -67,6 +67,13 @@ async def check_results(items: list[dict]) -> tuple[list[str], list[tuple]]:
                     order = bool(turn.get("order_matters"))
                     if not gold or all(v is None for row in gold for v in row.values()):
                         errors.append(f"{where}: 标准 SQL 结果为空")
+                    # 结果追问轮的关键词必须出现在标准答案里，否则直接回答永远判不对
+                    cells = {str(v) for row in gold for v in row.values()}
+                    for text in turn.get("gold_answer_contains") or []:
+                        if not any(text in cell for cell in cells):
+                            errors.append(
+                                f"{where}: gold_answer_contains 的“{text}”不在标准结果里"
+                            )
                     if not results_equal(gold, gold, order):
                         errors.append(f"{where}: 判定器认为标准结果与自身不同")
                     trap_same = results_equal(trap, gold, order)
