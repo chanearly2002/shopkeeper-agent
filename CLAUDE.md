@@ -230,7 +230,7 @@ extract_keywords ─┬─ recall_column    ─┐
 - `evals/multiturn.py`（`--multiturn teacher|free`）：用会话图逐轮作答，`subgraphs=True` 捕获单轮图节点输出做归因，意图判断错误归为“意图错误”（意图按第一次判断计，衡量该不该反问）。会话停在反问处时用 `clarify_reply` 恢复（不该问却问了时用默认回答“按你的理解直接查询”）。`teacher` 每轮新开会话、用标准答案（含标准 SQL 执行结果的预览，以及上一轮完整结果 `last_result`）填充历史；`free` 用同一个 thread_id。汇总 `summarize_dialogs`：意图准确率、追问轮准确率、整段对话成功率，`accuracy` / `per_case`（`id#轮次`）与单轮同名，可复用基线比较
 - 单轮 runner 仍直接调用单轮图（不经过会话图），单轮基线不受多轮改造影响；单轮模式会跳过多轮题
 - `notebooks/eval_tutorial.ipynb`：评测教程（思路、判分规则演示、在库自检、单题追踪、归因、真实结果解读、Windows 差异附录）。第 9～10 节读取 `evals/results/glm-5.3-flash/`
-- `evals/results/<模型>/<实验名>/`：提交进仓库的真实评测结果（从 `evals/reports/<时间戳>/` 复制的 `summary.json`、`results.jsonl`、`summary.md`），实验名为 `baseline`（含换问法）、`no_examples`、`no_lint`、`mt_teacher`、`mt_free`；`evals/baselines/<模型>.json` 是回归门禁用的基线
+- `evals/results/<模型>/<实验名>/`：提交进仓库的真实评测结果（从 `evals/reports/<时间戳>/` 复制的 `summary.json`、`results.jsonl`、`summary.md`），实验名为 `baseline`（含换问法）、`no_examples`、`no_lint`、`mt_teacher`、`mt_free`，以及多轮第一阶段代码的 `mt_teacher_phase1`、`mt_free_phase1`（对照用）；`evals/baselines/<模型>.json` 是回归门禁用的基线。当前结果：单轮 91%（原问法 96%），多轮自由对话追问轮 96%；剩余失败里 JSON 解析（模型输出全角引号）约占一半
 
 ## 已知问题与陷阱
 

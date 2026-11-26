@@ -319,7 +319,7 @@ cd frontend && pnpm lint    # 前端类型检查
 ## 当前限制与规划
 
 - **多轮会话没有持久化**：追问改写、基于结果回答、反问澄清都已支持，但会话保存在进程内存里，服务重启即丢失，也没有会话列表和历史加载；首轮问题默认不会反问。
-- **评测还缺真实模型的基线**：评测集、runner 和回归门禁已就绪，但尚未用真实 LLM 跑出基线数据；也还没有接入 CI。
+- **评测**：已有 glm-5.3-flash 的基线（单轮 91%，原问法 96%、换问法 86%；多轮自由对话的追问轮 96%、整段对话成功率 91%），结果和解读见 `notebooks/eval_tutorial.ipynb`；还没有接入 CI。
 - **生产化能力**：权限控制、多租户、查询缓存、限流、监控告警等暂未涉及。
 
 开源项目借鉴评估、多轮问数（基于 LangGraph checkpointer）方案和后续路线见 [docs/design/borrowing-and-roadmap.md](docs/design/borrowing-and-roadmap.md)。
