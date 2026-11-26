@@ -4,7 +4,7 @@
 
 ## 项目定位
 
-「电商问数」是一个 NL2SQL 智能问数 Agent：用户用自然语言提问，系统先从元数据知识库召回相关字段、指标、字段取值，再由 LLM 分步过滤上下文、生成 SQL、校验、修正并在教学数仓上执行，过程通过 SSE 流式推给前端。同一会话里的追问会先结合上文改写成独立问题再走单轮流程（多轮会话图，第一阶段）。
+「电商问数」是一个 NL2SQL 智能问数 Agent：用户用自然语言提问，系统先从元数据知识库召回相关字段、指标、字段取值，再由 LLM 分步过滤上下文、生成 SQL、校验、修正并在教学数仓上执行，过程通过 SSE 流式推给前端。同一会话里的追问会先结合上文改写成独立问题再走单轮流程；针对上一轮结果的提问直接基于结果回答，信息不足时先反问用户（多轮会话图）。
 
 - 后端：Python 3.14 + FastAPI + LangGraph + LangChain + SQLAlchemy(async)，依赖用 `uv` 管理
 - 前端：React 19 + Vite + Tailwind CSS 3 + TypeScript，依赖用 `pnpm` 管理（位于 `frontend/`）
@@ -94,19 +94,26 @@ api (router/schemas/dependencies/lifespan)
 ### 多轮会话图（`app/agent/session_graph.py`）
 
 ```
-START ─ contextualize ─ run_pipeline ─ remember ─ END        checkpointer（InMemorySaver）按 thread_id 保存
+START ─ contextualize ─┬─(clarify)──────────────── ask_clarification ─(interrupt / resume)─► contextualize
+                       ├─(result_qa 且有 last_result)─ answer_from_result ─┬─(答出)───► remember ─ END
+                       │                                                  └─(答不了)─► run_pipeline
+                       └─(其他)──────────────────────────────────────────────────────► run_pipeline ─► remember
+checkpointer（InMemorySaver）按 thread_id 保存，也是 interrupt 暂停 / 恢复的前提
 ```
 
 | 节点 | 做什么 |
 | --- | --- |
-| `contextualize` | 结合最近 `conversation.history_turns` 轮历史，把本轮输入改写成独立问题并判断意图（`new` / `followup` / `result_qa`，常量在 `app/core/conversation.py`），发 `rewrite` 事件；**首轮跳过 LLM**；LLM 输出不合法时退回“原话当新问题”并发 `status: error`，不中断。同时确定会话的 `today` |
-| `run_pipeline` | 以 `standalone` 和 `today` 调用单轮图（`stream_mode=["custom","values"]`），原样转发单轮图的事件；单轮流程抛异常时发 `error` 事件、把错误记进本轮，**不向外抛**，会话照常进入 `remember` |
-| `remember` | 追加一轮 `Turn`（原话、改写、意图、SQL、结果预览、错误、today） |
+| `contextualize` | 每轮先清空本轮字段（sql / result_preview / error / answer）；结合最近 `conversation.history_turns` 轮历史，把本轮输入改写成独立问题并判断意图（`new` / `followup` / `result_qa` / `clarify`，常量在 `app/core/conversation.py`），非 clarify 时发 `rewrite` 事件；**首轮默认跳过 LLM**（`conversation.contextualize_first_turn` 打开后首轮也改写，才能对首轮反问）；用户回答过反问时把回答以“（补充：……）”拼在原话后再改写，且不允许再次 clarify；LLM 输出不合法时退回“原话当新问题”并发 `status: error`，不中断。同时确定会话的 `today` |
+| `ask_clarification` | `interrupt({"question", "options"})` 暂停；`Command(resume=回答)` 恢复后写 `clarification`、`clarified=True`，回到 `contextualize`。恢复时本节点会**重新执行**，`interrupt()` 之前的代码跑两次（分属提问和回答两个请求的事件流） |
+| `answer_from_result` | `result_qa` 且 `last_result` 存在时，用上一轮完整结果（≤ `conversation.answer_max_rows` 行、未截断）让 LLM 直接回答（JSON `{answerable, answer}`），发 `answer` 事件；答不了、格式不对或报错时 `answer=None`，退回 `run_pipeline` |
+| `run_pipeline` | 以 `standalone` 和 `today` 调用单轮图（`stream_mode=["custom","values"]`），原样转发单轮图的事件；`followup` 时把最近一条有 SQL 的轮次的问题和 SQL 作为 `reference` 传给 `generate_sql`；结果不大时整份写进 `last_result`；单轮流程抛异常时发 `error` 事件、把错误记进本轮，**不向外抛**，会话照常进入 `remember` |
+| `remember` | 追加一轮 `Turn`（原话、改写、意图、SQL、结果预览、直接回答、反问后的补充、错误、today） |
 
 - **checkpointer 只挂在会话图上**：单轮图用 `compile(checkpointer=False)` 编译，作为子图被调用时也不会继承外层 checkpointer（不写 `run_pipeline:*` 命名空间的检查点）。不要去掉这个参数，否则召回结果、表结构等大对象每一步都会写进检查点
-- `SessionState.history` 有 `operator.add` reducer，只追加；其余字段是“本轮”数据，`contextualize` / `run_pipeline` 每轮都会完整覆盖（包括置 None），新增本轮字段时也要每轮覆盖，否则会串到下一轮
-- 会话记忆只存结果预览（`summarize_result`：列名、行数、前 `conversation.result_preview_rows` 行，值转成基础类型），不存完整结果
-- `result_qa` 目前也走单轮流水线重新查库（改写成可独立查询的问题），`answer_from_result` 和澄清（interrupt）是后续步骤
+- `SessionState.history` 有 `operator.add` reducer，只追加；其余字段是“本轮”数据，由 `contextualize` 在每轮开头清空（`clarified` / `clarification` 由 `QueryService` 的新一轮输入重置），新增本轮字段时也要每轮清空，否则会串到下一轮；`last_result` 例外，只由 `run_pipeline` 更新，跨轮保留
+- 会话历史里每轮只存结果预览（`summarize_result`：列名、行数、前 `conversation.result_preview_rows` 行，值转成基础类型）；完整结果只保留最近一次查库的（`last_result`），给 `answer_from_result` 用
+- **参考 SQL 不改变单轮提示词**：`generate_sql.prompt` 里 `{reference}` 紧挨在示例和任务要求之间，为空串时提示词与原来逐字节相同，单轮基线和 LLM 缓存都不受影响（已用缓存验证 52/52 命中）
+- 会话停在反问处时：带 `resume` 的请求从暂停处恢复；不带 `resume` 的新问题会丢弃这次反问、从 START 开始新的一轮；没有待回答的反问却带了 `resume` 时，`QueryService` 先用 `aget_state` 检查并返回错误事件（否则图会以空输入运行而报错）
 - 客户端中途断开时本轮不会进入 `remember`，检查点停在 `run_pipeline` 之前；下一次带新输入调用会从 START 重新开始，不需要清理
 
 ### 单轮问数图（`app/agent/graph.py`）
@@ -135,7 +142,7 @@ extract_keywords ─┬─ recall_column    ─┐
 | `correct_sql` | 带完整上下文 + 报错做最小修正，覆盖 `sql`，`correct_attempts + 1`，然后回到 `validate_sql` | LLM |
 | `run_sql` | 只读校验后执行，最多 `agent.max_result_rows` 行、超时 `agent.max_execution_ms`；结果写回 `result` / `truncated` 并发 `result` 事件 | DW MySQL |
 
-一次查询约 6 次 LLM 调用（3 次检索词扩展、2 次过滤、1 次生成），每次修正再加 1 次（`recall_knowledge` 不调 LLM）；多轮会话中第 2 轮起再加 1 次改写。
+一次查询约 6 次 LLM 调用（3 次检索词扩展、2 次过滤、1 次生成），每次修正再加 1 次（`recall_knowledge` 不调 LLM）；多轮会话中第 2 轮起再加 1 次改写；基于上一轮结果直接回答的轮次只有 2 次（改写 + 回答），反问的轮次在用户回答后再改写一次。
 
 `today`：State 里的 `today`（接口可选字段）优先，其次 `agent.today` 配置，最后真实日期。多轮会话里首轮确定后整段会话沿用（存在 `SessionState.today`），请求显式传入时覆盖。
 
@@ -148,19 +155,21 @@ extract_keywords ─┬─ recall_column    ─┐
 
 ### SSE 协议（前后端契约）
 
-节点通过 `runtime.stream_writer` 写 dict，`session_graph.astream(stream_mode="custom")` 取出后由 `QueryService` 包成 `data: {json}\n\n`（单轮图的事件由 `run_pipeline` 转发）。请求体 `{"query", "today"?, "thread_id"?}`，`thread_id` 只允许字母数字、`-`、`_`，最长 64；不传则服务端生成：
+节点通过 `runtime.stream_writer` 写 dict，`session_graph.astream(stream_mode=["custom", "updates"])` 取出后由 `QueryService` 包成 `data: {json}\n\n`（单轮图的事件由 `run_pipeline` 转发；`updates` 里的 `__interrupt__` 转成 `clarify` 事件）。请求体 `{"query", "today"?, "thread_id"?, "resume"?}`，`thread_id` 只允许字母数字、`-`、`_`，最长 64，不传则服务端生成；`resume` 是对反问的回答（最长 200，必须同时带 `thread_id`）：
 
 ```json
 {"type": "session", "thread_id": "..."}
 {"type": "progress", "step": "校验SQL", "status": "running|success|error", "detail": "可选，失败原因"}
 {"type": "rewrite", "standalone_question": "改写后的独立问题", "intent": "new|followup|result_qa"}
+{"type": "clarify", "question": "反问的问题", "options": ["候选回答"]}
+{"type": "answer", "text": "基于上一轮结果的直接回答"}
 {"type": "result", "data": [{"列名": "值"}], "sql": "最终 SQL", "truncated": false, "max_rows": 1000}
 {"type": "error", "message": "..."}
 ```
 
-`session` 总是第一条；前端收到后保存 `thread_id`，之后的请求都带上它，“新会话”按钮清空它。
+`session` 总是第一条；前端收到后保存 `thread_id`，之后的请求都带上它，“新会话”按钮清空它。收到 `clarify` 时前端记下待回答的消息，下一次发送（点选项或直接输入）作为 `resume`；点“跳过”则下一次发送作为新问题。一轮结束时只会有 `result`、`answer`、`clarify`、`error` 之一
 
-`step` 的**中文名就是协议的一部分**（会话图的步骤是“理解问题”）：`frontend/src/components/StepRail.tsx` 里的 `nodes` 数组按这个字符串匹配节点状态，坐标和连线（`connectors`）也是手写的。前端 `upsertStep` 按步骤名记录最新状态，并统计进入 `running` 的次数（循环中的步骤显示 `×N`）。前端类型定义在 `frontend/src/types/agent.ts`，解析在 `frontend/src/lib/agentApi.ts`。
+`step` 的**中文名就是协议的一部分**（会话图的步骤是“理解问题”“反问澄清”“基于结果回答”）：`frontend/src/components/StepRail.tsx` 里的 `nodes` 数组按这个字符串匹配节点状态，坐标和连线（`connectors`）也是手写的。前端 `upsertStep` 按步骤名记录最新状态，并统计进入 `running` 的次数（循环中的步骤显示 `×N`）。前端类型定义在 `frontend/src/types/agent.ts`，解析在 `frontend/src/lib/agentApi.ts`。
 
 ### 标识与数据约定
 
@@ -198,7 +207,7 @@ extract_keywords ─┬─ recall_column    ─┐
 
 - **新增图节点**：`app/agent/nodes/<node>.py` → `graph.py` 注册节点和边 → 需要的新状态加到 `state.py` → 新外部依赖加到 `context.py`、`api/dependencies.py`、`services/query_service.py`，以及 `graph.py` 末尾的本地调试代码 → `StepRail.tsx` 的 `nodes` / `connectors` 加上同名步骤（否则前端不显示该步骤）。要在 `run_sql` 之后接节点（总结、图表等），直接读 `state["result"]`
 - **新增 SSE 事件类型**：节点里 `writer({...})` → `frontend/src/types/agent.ts` 的 `AgentEvent` → `App.tsx` 的 `onEvent`（未识别的事件类型会被忽略，只有 `type: error` 才显示为失败）
-- **会话图加节点 / 分支**（`answer_from_result`、澄清等）：`app/agent/nodes/<node>.py`（参数类型是 `SessionState`）→ `session_graph.py` 的 `build_session_graph` → 新的本轮字段加到 `SessionState` 并保证每轮覆盖 → `StepRail.tsx`。意图取值改动同步 `app/core/conversation.py` 的 `INTENTS`、`prompts/contextualize_question.prompt`、`frontend/src/types/agent.ts` 的 `Intent` 和 `MessageBubble.tsx` 的 `intentLabels`
+- **会话图加节点 / 分支**：`app/agent/nodes/<node>.py`（参数类型是 `SessionState`）→ `session_graph.py` 的 `build_session_graph` → 新的本轮字段加到 `SessionState` 并保证每轮覆盖 → `StepRail.tsx`。意图取值改动同步 `app/core/conversation.py` 的 `INTENTS`、`prompts/contextualize_question.prompt`、`frontend/src/types/agent.ts` 的 `Intent` 和 `MessageBubble.tsx` 的 `intentLabels`
 - **新增多轮评测题**：加到 `evals/datasets/multiturn.yaml`（第 2 轮起必须有 `gold_intent`、`gold_standalone`，`trap_sql` 一般是“没有正确承接上文”的写法）→ `uv run python -m evals.check_dataset -d evals/datasets/multiturn.yaml --per-category 0` → `uv run pytest`（`tests/test_eval_dataset.py` 固定了 20 段对话）。改写 Prompt 的 few-shot 示例与评测题不要用相同的实体和年份（示例用 2024 年）
 - **数仓加表/字段/指标**：改 `docker/mysql/dw.sql` → 改 `app/scripts/dw_generator.py` 生成对应数据 → 改 `conf/meta_config.yaml`（外键加 `ref`）→ 跑 `generate_dw_data`（会按 dw.sql 重建表）→ 重跑知识库构建（删除了表或指标时加 `--reset`）→ `export_dw_sql` 重新导出快照（同步更新 `docker/snapshot/README.md` 的关系表）→ `uv run pytest`
 - **新增评测题**：加到 `evals/datasets/traps.yaml`（字段说明见文件头）→ 每题必须有 `gold_sql` 和一条典型错误写法 `trap_sql` → `uv run python -m evals.check_dataset` 确认错误写法的结果与标准答案不同、保留两位小数后仍可区分 → `uv run pytest`（每类题数在 `tests/test_eval_dataset.py` 里固定为 5，增加题数时同步修改）
@@ -213,15 +222,15 @@ extract_keywords ─┬─ recall_column    ─┐
 
 - `evals/datasets/traps.yaml`：10 类业务口径陷阱 × 5 题（下单与支付口径、订单头/明细扇出、退款扣减、日期角色、地区角色、雪花关联、去重计数、活动归因、相对时间、漏斗分母），“今天”统一是 2025-12-31。每题有标准 SQL `gold_sql`、典型错误写法 `trap_sql` 及其说明、用于归因的 `expect`（表 / 指标 / 取值）
 - 题目口径以 `meta_config.yaml` 的指标定义为准：“销售额”= 支付金额（`pay_time IS NOT NULL`，按 `pay_date_id` 筛时间）；按商品/类目/品牌/活动拆分金额用明细 `pay_amount`；退款只认“退款成功”
-- `evals/compare.py`：结果等价判定（忽略列名和列顺序、允许多出列、数值相对误差 1e-9、接受预测值四舍五入到 1~4 位小数、比率列允许 ×100、只有 `order_matters` 才比较行顺序），`tests/test_compare.py` 覆盖每条规则
+- `evals/compare.py`：结果等价判定（忽略列名和列顺序、允许多出列、数值相对误差 1e-9、接受预测值四舍五入到 1~4 位小数、比率列允许 ×100、只有 `order_matters` 才比较行顺序；时间标签换算：整列是同一年的“年月”标签（`'2025-01'`、`202501`、`'2025年1月'`）时可按月份数字与标准列比较，日期 `'2025-12-25'` 与日期键 `20251225` 互认），`tests/test_compare.py` 覆盖每条规则。放宽判分规则后必须重跑 `check_dataset` 和 `--predictor trap`，确认没有把错误写法判对
 - `evals/dataset.py`：不连库的静态检查（pytest 会跑）；`evals/check_dataset.py`：连数仓执行标准 SQL 和错误写法
 - 评测题依赖生成数据：**改了 `dw_generator.py` 或数据规模后必须重跑 `check_dataset`**，个别题的区分度可能因此消失（例如 `date_role_01` 只差 1 单）
 - `evals/runner.py`：答题打分。`--predictor agent` 用问数图答题，并通过 `graph.astream(stream_mode=["updates", "custom"])` 捕获每个节点的输出做归因（召回遗漏 → 过滤误删 → SQL 不可执行 → 结果不符，`evals/scoring.py`）；`gold` / `trap` 用标准 SQL / 错误写法作答，应分别为 100% / 0%，用来自检打分逻辑。支持 `--paraphrases`、`--no-examples`、`--no-semantic-check`、`--llm-cache`（`evals/llm_cache.py`，sqlite 录制回放）、`--baseline` / `--save-baseline`（退化时退出码 1）。报告在 `evals/reports/`（已 gitignore）
-- `evals/datasets/multiturn.yaml`：20 段对话（省略、追加条件、换维度 / 下钻、引用上一轮结果、纠正口径、新话题），44 轮；第 2 轮起标注 `gold_intent` / `gold_standalone`。`result_qa` 轮目前也用 `gold_sql` 判分，标准 SQL 只选被问到的列
-- `evals/multiturn.py`（`--multiturn teacher|free`）：用会话图逐轮作答，`subgraphs=True` 捕获单轮图节点输出做归因，意图判断错误归为“意图错误”。`teacher` 每轮新开会话、用标准答案（含标准 SQL 执行结果的预览）填充历史；`free` 用同一个 thread_id。汇总 `summarize_dialogs`：意图准确率、追问轮准确率、整段对话成功率，`accuracy` / `per_case`（`id#轮次`）与单轮同名，可复用基线比较
+- `evals/datasets/multiturn.yaml`：22 段对话（省略、追加条件、换维度 / 下钻、引用上一轮结果、纠正口径、新话题、需要反问），48 轮；第 2 轮起标注 `gold_intent` / `gold_standalone`。`result_qa` 轮另有 `gold_answer_contains`（直接回答时回答里必须出现的内容，`check_dataset` 会确认它们出现在标准结果里），Agent 退回查库时仍按 `gold_sql` 判分；`clarify` 轮另有 `clarify_reply`（扮演用户回答反问），`gold_standalone` / `gold_sql` 是澄清之后的问题和答案
+- `evals/multiturn.py`（`--multiturn teacher|free`）：用会话图逐轮作答，`subgraphs=True` 捕获单轮图节点输出做归因，意图判断错误归为“意图错误”（意图按第一次判断计，衡量该不该反问）。会话停在反问处时用 `clarify_reply` 恢复（不该问却问了时用默认回答“按你的理解直接查询”）。`teacher` 每轮新开会话、用标准答案（含标准 SQL 执行结果的预览，以及上一轮完整结果 `last_result`）填充历史；`free` 用同一个 thread_id。汇总 `summarize_dialogs`：意图准确率、追问轮准确率、整段对话成功率，`accuracy` / `per_case`（`id#轮次`）与单轮同名，可复用基线比较
 - 单轮 runner 仍直接调用单轮图（不经过会话图），单轮基线不受多轮改造影响；单轮模式会跳过多轮题
 - `notebooks/eval_tutorial.ipynb`：评测教程（思路、判分规则演示、在库自检、单题追踪、归因、真实结果解读、Windows 差异附录）。第 9～10 节读取 `evals/results/glm-5.3-flash/`
-- `evals/results/<模型>/<实验名>/`：提交进仓库的真实评测结果（从 `evals/reports/<时间戳>/` 复制的 `summary.json`、`results.jsonl`、`summary.md`），实验名为 `baseline`（含换问法）、`no_examples`、`no_lint`、`mt_teacher`、`mt_free`；`evals/baselines/<模型>.json` 是回归门禁用的基线
+- `evals/results/<模型>/<实验名>/`：提交进仓库的真实评测结果（从 `evals/reports/<时间戳>/` 复制的 `summary.json`、`results.jsonl`、`summary.md`），实验名为 `baseline`（含换问法）、`no_examples`、`no_lint`、`mt_teacher`、`mt_free`，以及多轮第一阶段代码的 `mt_teacher_phase1`、`mt_free_phase1`（对照用）；`evals/baselines/<模型>.json` 是回归门禁用的基线。当前结果：单轮 91%（原问法 96%），多轮自由对话追问轮 96%；剩余失败里 JSON 解析（模型输出全角引号）约占一半
 
 ## 已知问题与陷阱
 
@@ -247,13 +256,14 @@ extract_keywords ─┬─ recall_column    ─┐
 - 关联路径补全只在候选表“不连通”时才加表；若召回已经带进了经由维度表的关联（如同时召回了 `dim_shop` 和 `dim_sku`），是否扇出取决于模型按 `ref` 写 JOIN 的质量
 - 生成数据的用户只有 3000 个，人均订单多，浏览转化率、复购率明显高于真实业务，只适合检验 SQL 写法，不代表真实水平
 - 请求级 `AsyncSession` 不支持并发使用。目前并行的 `recall_*` 节点不碰 MySQL 所以没问题；新增会访问 MySQL 的并行节点时要注意
-**多轮（第一阶段，见 `borrowing-and-roadmap.md` 4.8）**
-- 会话存在进程内的 `InMemorySaver`：服务重启即丢失；每轮会写多个包含完整历史的检查点，会话越长、越多，内存占用越大，没有过期清理。持久化（`AsyncMySaver`）是后续步骤
+**多轮（步骤 1～5 已完成，见 `borrowing-and-roadmap.md` 4.9、4.10）**
+- 会话存在进程内的 `InMemorySaver`：服务重启即丢失（包括停在反问处、尚未回答的会话）；每轮会写多个包含完整历史的检查点，会话越长、越多，内存占用越大，没有过期清理。持久化（第 6 步）暂缓：要新增检查点存储（SQLite 文件或独立的 MySQL 库），需要先确认
+- 直接回答里的计算（差值、占比）由 LLM 完成，没有程序校验，可能算错；评测只检查回答里有没有关键内容
+- 首轮默认不经过改写节点，所以首轮问题不会反问（`conversation.contextualize_first_turn` 可打开，代价是每个首轮多一次 LLM 调用）
 - 同一个 `thread_id` 的并发请求没有加锁（前端在流式期间禁用发送）；两个请求交错会让历史错乱
 - 前端消息列表仍只在浏览器内存里，刷新后后端会话还在但页面看不到历史；没有会话列表接口
 - 改写只看最近 3 轮且结果只有前 5 行：引用“第 8 名”这类预览之外的行会改写失败
 - 改写失败（LLM 输出不是 JSON）时按原话当新问题处理，追问会被当作独立问题查询，可能查出与预期不同的结果；前端“理解问题”步骤会显示失败原因
-- 还没有用真实 LLM 跑多轮评测；本地只用按题目应答的假 LLM 验证过流程、事件和打分
 - 权限控制、多租户、查询缓存、限流、监控告警等生产化能力尚未涉及（README“当前限制与规划”一节）
 
 ## 本地完整联调的注意事项

@@ -11,11 +11,16 @@ import pytest
 import yaml
 
 from app.core.conversation import (
+    INTENT_CLARIFY,
     INTENT_FOLLOWUP,
     INTENT_NEW,
     INTENT_RESULT_QA,
     format_history,
+    format_reference,
+    merge_clarification,
+    parse_answer,
     parse_rewrite,
+    rows_for_answer,
     summarize_result,
     to_plain,
 )
@@ -93,27 +98,89 @@ def test_format_history_falls_back_to_question():
 
 def test_parse_rewrite_followup():
     out = {"intent": "followup", "standalone_question": " 2025 年华南的销售额 "}
-    assert parse_rewrite(out, "那华南呢") == (INTENT_FOLLOWUP, "2025 年华南的销售额")
+    r = parse_rewrite(out, "那华南呢")
+    assert (r.intent, r.standalone) == (INTENT_FOLLOWUP, "2025 年华南的销售额")
+    assert r.clarify_question is None and r.options == []
 
 
 def test_parse_rewrite_result_qa():
     out = {"intent": "RESULT_QA", "standalone_question": "销售额最高的大区是哪个"}
-    assert parse_rewrite(out, "哪个最高")[0] == INTENT_RESULT_QA
+    assert parse_rewrite(out, "哪个最高").intent == INTENT_RESULT_QA
 
 
 def test_parse_rewrite_new_keeps_user_input():
     # 新问题不允许模型把上文条件带进来
     out = {"intent": "new", "standalone_question": "2025 年铂金会员有多少个"}
-    assert parse_rewrite(out, "铂金会员有多少个") == (INTENT_NEW, "铂金会员有多少个")
+    r = parse_rewrite(out, "铂金会员有多少个")
+    assert (r.intent, r.standalone) == (INTENT_NEW, "铂金会员有多少个")
 
 
 def test_parse_rewrite_unknown_intent_and_empty_question():
-    assert parse_rewrite({"intent": "clarify"}, "看看最近的情况") == (
-        INTENT_FOLLOWUP,
-        "看看最近的情况",
-    )
+    r = parse_rewrite({"intent": "chitchat"}, "看看最近的情况")
+    assert (r.intent, r.standalone) == (INTENT_FOLLOWUP, "看看最近的情况")
+
+
+def test_parse_rewrite_clarify():
+    out = {
+        "intent": "clarify",
+        "standalone_question": "最近 7 天的销售额",
+        "clarify_question": "你说的最近是指多久？",
+        "options": ["最近 7 天", "本月", "最近 7 天", "", "本季度", "今年", "近 30 天"],
+    }
+    r = parse_rewrite(out, "最近卖得怎么样")
+    assert r.intent == INTENT_CLARIFY
+    assert r.clarify_question == "你说的最近是指多久？"
+    # 去重、去空，最多保留 4 个
+    assert r.options == ["最近 7 天", "本月", "本季度", "今年"]
+
+
+def test_parse_rewrite_clarify_downgraded():
+    out = {"intent": "clarify", "standalone_question": "最近 7 天的销售额"}
+    # 没给出澄清问题
+    assert parse_rewrite(out, "最近呢").intent == INTENT_FOLLOWUP
+    # 已经反问过或功能关闭
+    out["clarify_question"] = "多久？"
+    r = parse_rewrite(out, "最近呢", allow_clarify=False)
+    assert (r.intent, r.standalone) == (INTENT_FOLLOWUP, "最近 7 天的销售额")
 
 
 def test_parse_rewrite_rejects_non_object():
     with pytest.raises(ValueError):
         parse_rewrite(["new"], "q")
+
+
+def test_merge_clarification():
+    assert merge_clarification(" 最近呢 ", " 最近 7 天 ") == "最近呢（补充：最近 7 天）"
+
+
+def test_format_reference():
+    assert format_reference("q", None) == ""
+    text = format_reference("2025 年各大区的销售额", "select 1\n")
+    assert text.startswith("\n") and text.endswith("select 1\n")
+    assert "2025 年各大区的销售额" in text
+
+
+def test_rows_for_answer():
+    rows = [
+        {"area": "华东", "amt": Decimal("1.50")},
+        {"area": "华南", "amt": Decimal("2")},
+    ]
+    assert rows_for_answer(rows, False, 5) == [
+        {"area": "华东", "amt": 1.5},
+        {"area": "华南", "amt": 2},
+    ]
+    assert rows_for_answer(rows, True, 5) is None  # 被截断
+    assert rows_for_answer(rows, False, 1) is None  # 超过上限
+    assert rows_for_answer([], False, 5) is None
+
+
+def test_parse_answer():
+    assert parse_answer({"answerable": True, "answer": " 华东最高 "}) == "华东最高"
+    assert parse_answer({"answerable": False, "answer": "x"}) is None
+    assert parse_answer({"answerable": True, "answer": ""}) is None
+    assert parse_answer("华东") is None
+
+
+def test_format_history_includes_answer():
+    turn = _turn(1, sql=None, result_preview=None, answer="华东最高")
+    assert yaml.safe_load(format_history([turn]))[0]["回答"] == "华东最高"

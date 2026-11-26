@@ -74,3 +74,43 @@ def test_different_row_counts_fail():
 def test_null_handling():
     assert results_equal([{"x": None}], [{"x": None}])
     assert not results_equal([{"x": 0}], [{"x": None}])
+
+
+def test_year_month_labels_match_month_numbers():
+    gold = [{"月份": 1, "销售额": 10.5}, {"月份": 2, "销售额": 20.0}]
+    for labels in (
+        ["2025-01", "2025-02"],
+        [202501, 202502],
+        ["202501", "202502"],
+        ["2025年1月", "2025年2月"],
+    ):
+        pred = [{"m": labels[0], "amt": 10.5}, {"m": labels[1], "amt": 20.0}]
+        assert results_equal(pred, gold), labels
+
+
+def test_year_month_requires_single_year_and_aligned_rows():
+    gold = [{"月份": 1, "销售额": 10.5}, {"月份": 2, "销售额": 20.0}]
+    # 跨年的月份标签不换算：“1 月”指哪年说不清
+    assert not results_equal(
+        [{"m": "2024-01", "amt": 10.5}, {"m": "2025-02", "amt": 20.0}], gold
+    )
+    # 月份换算后仍要逐行对齐：金额挂错月份要判错
+    assert not results_equal(
+        [{"m": "2025-01", "amt": 20.0}, {"m": "2025-02", "amt": 10.5}], gold
+    )
+    # 月份值本身错了
+    assert not results_equal(
+        [{"m": "2025-03", "amt": 10.5}, {"m": "2025-02", "amt": 20.0}], gold
+    )
+
+
+def test_dates_match_date_keys():
+    gold = [{"日期": 20251225, "销售额": 1.0}, {"日期": 20251226, "销售额": 2.0}]
+    pred = [{"d": date(2025, 12, 25), "v": 1.0}, {"d": "2025-12-26", "v": 2.0}]
+    assert results_equal(pred, gold)
+    assert results_equal(
+        gold, [{"d": "2025-12-25", "v": 1.0}, {"d": "2025-12-26", "v": 2.0}]
+    )
+    assert not results_equal(
+        [{"d": "2025-12-24", "v": 1.0}, {"d": "2025-12-26", "v": 2.0}], gold
+    )

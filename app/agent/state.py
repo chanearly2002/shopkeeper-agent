@@ -73,6 +73,8 @@ class DataAgentState(TypedDict):
     """一次问数链路中的核心状态"""
 
     query: str  # 用户输入的查询
+    # 多轮追问时上一轮的问题和 SQL（已格式化），作为生成 SQL 的参考；单轮查询没有
+    reference: NotRequired[str]
     # 本次查询的“今天”（YYYY-MM-DD），不传则用 agent.today 配置；评测每题、多轮每个会话都可以单独指定
     today: NotRequired[str]
     keywords: list[str]  # 抽取的关键词
@@ -112,9 +114,11 @@ class Turn(TypedDict):
     question: str  # 用户原话
     standalone: str  # 改写后的独立问题，实际交给单轮流水线的问题
     intent: str  # new / followup / result_qa，见 app/core/conversation.py
-    sql: str | None  # 最终执行的 SQL，失败时为 None
-    result_preview: ResultPreview | None  # 结果预览，失败时为 None
+    sql: str | None  # 最终执行的 SQL，失败或直接基于结果回答时为 None
+    result_preview: ResultPreview | None  # 结果预览，失败或直接回答时为 None
     error: str | None  # 本轮失败原因
+    answer: NotRequired[str | None]  # 基于上一轮结果直接回答的文本
+    clarification: NotRequired[str | None]  # 本轮反问后用户的回答
     today: str  # 本轮使用的“今天”
 
 
@@ -127,9 +131,18 @@ class SessionState(TypedDict):
     # 历史轮次只追加不修改；reducer 让 remember 节点每轮只需返回新的一轮
     history: Annotated[list[Turn], operator.add]
 
-    # 以下是“本轮”的数据，每轮都会被完整覆盖，不会串到下一轮
+    # 最近一次查库的完整结果（不超过 conversation.answer_max_rows 行，值已转成基础类型），
+    # 供下一轮“哪个最高”这类提问直接回答；只有 run_pipeline 会更新它，直接回答的轮次不改
+    last_result: NotRequired[list[dict] | None]
+
+    # 以下是“本轮”的数据，每轮由 contextualize 先清空，不会串到下一轮
     intent: str
     standalone: str
     sql: str | None
     result_preview: ResultPreview | None
     error: str | None
+    answer: str | None  # answer_from_result 的回答，None 表示没有直接回答（要查库）
+    clarify_question: str | None  # 需要反问时的问题
+    clarify_options: list[str]  # 反问的候选项，可为空
+    clarification: str | None  # 用户对反问的回答
+    clarified: bool  # 本轮是否已经反问过；反问过就不再反问，避免循环

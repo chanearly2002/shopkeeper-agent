@@ -2,7 +2,7 @@
 问数查询服务
 
 负责把 API 层传入的自然语言问题转换成一次 LangGraph 工作流执行：
-创建本轮输入、组装 Runtime Context、按 thread_id 驱动多轮会话图，
+创建本轮输入（或回答反问的恢复指令）、组装 Runtime Context、按 thread_id 驱动多轮会话图，
 消费 session_graph.astream 的流式输出，并统一包装成 SSE 文本返回给路由层。
 """
 
@@ -10,6 +10,7 @@ import json
 import uuid
 
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
+from langgraph.types import Command
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.context import DataAgentContext
@@ -89,33 +90,71 @@ class QueryService:
         )
 
     async def query(
-        self, query: str, today: str | None = None, thread_id: str | None = None
+        self,
+        query: str,
+        today: str | None = None,
+        thread_id: str | None = None,
+        resume: str | None = None,
     ):
         """
         在 thread_id 对应的会话里执行一轮问数，并逐段产出 SSE 消息
 
-        不传 thread_id 时新建会话；第一条消息总是 session 事件，告诉前端本轮所属的会话
+        - 不传 thread_id 时新建会话；第一条消息总是 session 事件，告诉前端本轮所属的会话
+        - 传 resume 时表示回答上一条反问：从暂停处恢复，而不是开始新的一轮
+        - 会话图在反问处暂停时，产出 clarify 事件，本次请求随即结束
         """
         thread_id = thread_id or uuid.uuid4().hex
         yield _sse({"type": "session", "thread_id": thread_id})
 
-        # 本轮输入只有用户原话；today 显式传入时覆盖会话里的“今天”，否则沿用会话或配置
-        state = SessionState(user_input=query)
-        if today:
-            state["today"] = today
         # Context 保存本次图执行需要复用的外部依赖，节点通过 runtime.context 读取
         context = self.build_context()
         # 会话图的 checkpointer 按 thread_id 读取和保存历史
         config = {"configurable": {"thread_id": thread_id}}
         try:
-            # stream_mode="custom" 对应节点内部 writer(...) 写出的进度、改写和结果消息
-            async for chunk in session_graph.astream(
-                input=state, config=config, context=context, stream_mode="custom"
+            if resume is not None:
+                # 没有待回答的反问时直接恢复，图会以空输入运行，必须先检查
+                if not await pending_clarification(config):
+                    yield _sse(
+                        {
+                            "type": "error",
+                            "message": "当前会话没有待回答的反问，请直接提问",
+                        }
+                    )
+                    return
+                graph_input = Command(resume=resume)
+            else:
+                # 新的一轮：原话 + 本轮字段的初值；today 显式传入时覆盖会话里的“今天”。
+                # 即使上一轮停在反问处，带新输入调用也会丢弃那次反问、从头开始
+                graph_input = SessionState(
+                    user_input=query, clarified=False, clarification=None
+                )
+                if today:
+                    graph_input["today"] = today
+
+            # custom 是节点写出的进度、改写、回答和结果消息；updates 用来发现 interrupt
+            async for mode, chunk in session_graph.astream(
+                input=graph_input,
+                config=config,
+                context=context,
+                stream_mode=["custom", "updates"],
             ):
-                yield _sse(chunk)
+                if mode == "custom":
+                    yield _sse(chunk)
+                elif "__interrupt__" in chunk:
+                    question = chunk["__interrupt__"][0].value
+                    yield _sse({"type": "clarify", **question})
         except Exception as e:
             # 流式接口已经开始返回后不能再改 HTTP 状态码，因此把异常也包装成一条 SSE 消息
             yield _sse({"type": "error", "message": str(e)})
+
+
+async def pending_clarification(config: dict) -> dict | None:
+    """会话当前是否停在反问处；是则返回反问的内容（question、options）"""
+    snapshot = await session_graph.aget_state(config)
+    for task in snapshot.tasks:
+        for item in task.interrupts:
+            return item.value
+    return None
 
 
 def _sse(event: dict) -> str:

@@ -213,7 +213,28 @@ class SessionState(TypedDict):
 - 前端：浏览器里连续追问，“理解问题”节点、改写横幅、“理解有误”回填、“新会话”清空会话 id 均正常
 - 单轮 runner 的 agent 模式行为不变（仍直接调用单轮图，每题 6 次 LLM 调用）
 
-**尚未验证**：真实模型的改写质量和多轮准确率。建议先跑 `--multiturn teacher`（看单轮追问能力和意图混淆），再跑 `--multiturn free`（看错误累积），两者都用 `--llm-cache` 录制以便复现。
+**真实模型验证**：后来用 glm-5.3-flash 跑了完整评测，第一阶段的结果见 `evals/results/glm-5.3-flash/mt_*_phase1/`，与第 4、5 步之后的对比见 4.10。
+
+### 4.10 实施进度（步骤 4、5 已完成，步骤 6 暂缓）
+
+**步骤 4：追问带参考 SQL、基于上一轮结果回答**
+
+- `run_pipeline` 在 `followup` 时把最近一条有 SQL 的轮次的问题和 SQL 作为 `reference` 传给 `generate_sql`。`{reference}` 在模板里紧挨在示例和任务要求之间，为空串时提示词与原来逐字节相同：用单轮评测的 LLM 缓存在改动后重跑 8 次作答，52 次调用全部命中，单轮基线不受影响
+- 新节点 `answer_from_result`：`result_qa` 且上一轮结果不超过 `conversation.answer_max_rows`（200）行、没有截断时，把完整结果交给 LLM 直接回答（`answer` 事件），不再查库；模型判断答不了、输出格式不对或报错时退回 `run_pipeline`。完整结果只保留最近一次查库的（`SessionState.last_result`），历史里每轮仍只存前 5 行预览
+- 评测：`result_qa` 轮增加 `gold_answer_contains`，直接回答时按关键内容判分，退回查库时仍按 `gold_sql` 判分；teacher 模式额外用上一轮标准结果填充 `last_result`
+
+**步骤 5：反问澄清**
+
+- 意图新增 `clarify`。Prompt 只允许在三种情况反问：时间范围完全缺失、比较基准不明、指代对象有多个候选；业务术语已有默认口径的不问
+- 新节点 `ask_clarification` 用 `interrupt()` 暂停，`QueryService` 把 `__interrupt__` 转成 `clarify` 事件；接口新增 `resume` 字段，以 `Command(resume=...)` 恢复，回答以“（补充：……）”拼在原话后回到 `contextualize`，每轮最多反问一次
+- 已验证的 LangGraph 行为：恢复时节点会重新执行；停在反问处时发来不带 `resume` 的新问题，会丢弃这次反问、从头开始一轮；没有待回答的反问时直接 `Command(resume)` 会以空输入运行而报错，所以 `QueryService` 先用 `aget_state` 检查
+- 前端：反问卡片（选项按钮、“跳过，直接提新问题”）、输入框提示、流程图新增“反问澄清”“基于结果回答”两个节点
+- 首轮默认不经过改写节点，所以首轮不会反问；`conversation.contextualize_first_turn` 打开后首轮也能反问，代价是每个首轮多一次 LLM 调用
+- 评测：新增 2 段需要反问的对话（“最近”没有范围、“那个品牌”有三个候选），标注 `clarify_reply` 扮演用户回答；意图按第一次判断计，用来衡量该不该反问
+
+**评测结果（glm-5.3-flash）**：同一批 20 段对话的追问轮准确率，teacher 模式 92% → 100%，自由对话 88% → 100%。第一阶段的 3 种真实错误都对上了原因：加条件后地区角色用错、“销量”按下单口径（这两种由参考 SQL 修好），“再按平台拆”丢了按月维度（由改写规则区分叠加维度和替换维度修好）。反问是现在最弱的一环：2 段需要反问的对话只在自由对话里成功 1 次，另外还有 1 次不该问却问了。详细解读见 `notebooks/eval_tutorial.ipynb` 第 10 节。
+
+**步骤 6：持久化（暂缓）**：需要新增检查点存储（官方 SQLite 检查点文件，或在 MySQL 里新建独立的库），与“数据库表结构保持与仓库一致”的约定有关，先不做。
 
 ---
 

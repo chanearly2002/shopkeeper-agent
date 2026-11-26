@@ -44,6 +44,7 @@ async def generate_sql(state: DataAgentState, runtime: Runtime[DataAgentContext]
                 "query",
                 "terms",
                 "examples",
+                "reference",
             ],
         )
         # SQL 生成节点只需要纯文本 SQL，不能要求模型输出 JSON 或 Markdown 代码块
@@ -64,6 +65,8 @@ async def generate_sql(state: DataAgentState, runtime: Runtime[DataAgentContext]
                 "query": query,
                 "terms": format_terms(state.get("term_infos", [])),
                 "examples": format_examples(state.get("example_infos", [])),
+                # 多轮追问时是上一轮的问题和 SQL；单轮为空串，提示词与原来逐字节相同
+                "reference": state.get("reference", ""),
             }
         )
         # 模型偶尔仍会输出 ```sql 代码块或末尾分号，统一清洗成可执行的纯 SQL

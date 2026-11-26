@@ -7,7 +7,7 @@
 
 from datetime import date
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class QuerySchema(BaseModel):
@@ -21,3 +21,13 @@ class QuerySchema(BaseModel):
     thread_id: str | None = Field(
         default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$"
     )
+    # 可选：回答上一条反问（clarify 事件）的内容，必须同时带上 thread_id；
+    # 此时 query 只用于前端展示，后端按 resume 恢复暂停的会话
+    resume: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def resume_needs_thread(self):
+        """回答反问必须指明是哪个会话"""
+        if self.resume is not None and not self.thread_id:
+            raise ValueError("resume 必须和 thread_id 一起传")
+        return self

@@ -2,6 +2,7 @@
  * 前端应用主组件
  * 负责聊天会话状态、SSE 事件消费和整体页面布局
  * 同一会话的请求都带上后端返回的 thread_id，追问由后端结合上文改写成独立问题
+ * 后端反问时（clarify 事件）记下待回答的消息，下一次发送作为 resume 回答它，会话从暂停处继续
  */
 import {
   Activity,
@@ -55,6 +56,8 @@ export default function App() {
   const [activeController, setActiveController] = useState<AbortController | null>(null);
   // 当前会话 id：首轮由后端生成并通过 session 事件返回，之后的追问都带上它
   const [threadId, setThreadId] = useState<string | null>(null);
+  // 待回答的反问所在的消息 id；不为空时，下一次发送作为对反问的回答（resume）
+  const [pendingClarifyId, setPendingClarifyId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const isStreaming = Boolean(activeController);
@@ -72,9 +75,26 @@ export default function App() {
     });
   }, [messages]);
 
+  // 把反问标记为已处理（回答或跳过），选项按钮不再可点
+  const closeClarify = () => {
+    if (!pendingClarifyId) return;
+    const id = pendingClarifyId;
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === id && message.clarify
+          ? { ...message, clarify: { ...message.clarify, answered: true } }
+          : message,
+      ),
+    );
+    setPendingClarifyId(null);
+  };
+
   const startQuery = async (rawQuery = draft) => {
     const query = rawQuery.trim();
     if (!query || isStreaming) return;
+    // 有待回答的反问时，这次发送就是对它的回答
+    const resume = pendingClarifyId ? query : undefined;
+    closeClarify();
 
     const userMessage: ChatMessage = {
       id: makeId(),
@@ -127,6 +147,20 @@ export default function App() {
             };
           }
 
+          if (event.type === "clarify") {
+            setPendingClarifyId(assistantId);
+            return {
+              ...message,
+              status: "done",
+              content: event.question,
+              clarify: { question: event.question, options: event.options ?? [] },
+            };
+          }
+
+          if (event.type === "answer") {
+            return { ...message, status: "done", content: event.text };
+          }
+
           if (event.type === "result") {
             return {
               ...message,
@@ -157,7 +191,7 @@ export default function App() {
     };
 
     try {
-      await streamQuery(query, { threadId, signal: controller.signal, onEvent });
+      await streamQuery(query, { threadId, resume, signal: controller.signal, onEvent });
       setMessages((current) =>
         current.map((message) =>
           message.id === assistantId && message.status === "streaming"
@@ -194,6 +228,7 @@ export default function App() {
     setDraft("");
     // 开始新会话：下一次提问不带 thread_id，后端会新建会话，不再承接之前的上文
     setThreadId(null);
+    setPendingClarifyId(null);
   };
 
   // 改写有误时，把改写后的问题放回输入框，用户修改后作为完整问题重新提问
@@ -317,6 +352,12 @@ export default function App() {
                     key={message.id}
                     message={message}
                     onCorrectRewrite={isStreaming ? undefined : correctRewrite}
+                    onPickOption={
+                      message.id === pendingClarifyId && !isStreaming ? startQuery : undefined
+                    }
+                    onSkipClarify={
+                      message.id === pendingClarifyId && !isStreaming ? closeClarify : undefined
+                    }
                   />
                 ))}
               </div>
@@ -336,6 +377,9 @@ export default function App() {
             onChange={setDraft}
             onSubmit={() => startQuery()}
             onStop={stopQuery}
+            placeholder={
+              pendingClarifyId ? "回答上面的问题，或点“跳过”后直接提新问题..." : undefined
+            }
           />
         </main>
       </div>

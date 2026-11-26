@@ -6,13 +6,17 @@
 #   gold_standalone  期望的改写结果（独立完整的问题）；teacher forcing 模式用它填充历史，
 #                    评测时不逐字比对，改写对不对看本轮 SQL 的执行结果
 # 第 1 轮的意图固定为 new，不需要标注
+# 意图为 result_qa 的轮次额外标注 gold_answer_contains：Agent 直接基于上一轮结果用文字回答时，
+#   回答里必须出现这些内容才算对；Agent 退回查库时仍按 gold_sql 判分
+# 意图为 clarify 的轮次额外标注 clarify_reply：评测时扮演用户回答反问的内容，
+#   gold_standalone / gold_sql 是按这个回答澄清之后的问题和答案
 #
 # 追问轮的 trap_sql 一般是“没有正确承接上文”的写法：沿用上一轮的 SQL、承接错了对象、
 # 或者把无关的上文条件带了进来；check_dataset 会确认它的结果与标准答案不同，
 # 保证每一轮追问都真正改变了答案
 #
-# result_qa（针对上一轮结果提问）目前仍改写成独立问题重新查库，所以同样用 gold_sql 判分；
-# 标准 SQL 只选出被问到的列（如“哪个大区”只选大区），模型多选列不影响判分
+# result_qa（针对上一轮结果提问）的标准 SQL 只选出被问到的列（如“哪个大区”只选大区），
+# 模型多选列不影响判分
 #
 # 与单轮题一样依赖生成数据，修改数据生成器后需要重新运行：
 #   uv run python -m evals.check_dataset -d evals/datasets/multiturn.yaml --per-category 0
@@ -733,6 +737,7 @@
     - question: 排第一的是哪个大区？
       gold_intent: result_qa
       gold_standalone: 2025 年销售额最高的大区是哪个？
+      gold_answer_contains: [华东]
       gold_sql: |
         select r.area as 大区
         from fact_order o
@@ -868,6 +873,7 @@
     - question: 哪种支付方式的订单最少？
       gold_intent: result_qa
       gold_standalone: 2025 年支付订单数最少的支付方式是哪种？
+      gold_answer_contains: [银行卡]
       gold_sql: |
         select payment_method as 支付方式
         from fact_order
@@ -1133,4 +1139,123 @@
       expect:
         tables: [dim_sku]
         values: [在售]
+      order_matters: false
+
+# ---------------------------------------------------------------------------
+# 7. 需要反问：信息不足、不同理解结果明显不同时，期望 Agent 先反问再查
+# ---------------------------------------------------------------------------
+- id: mt_clarify_01
+  category: clarify
+  tags: [多轮, 反问, 时间]
+  difficulty: medium
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年 12 月华南大区的支付订单数是多少？
+      gold_sql: |
+        select count(*) as 支付订单数
+        from fact_order o
+        join dim_region r on o.receiver_region_id = r.region_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20251201 and 20251231
+          and r.area = '华南'
+      trap_sql: |
+        select count(*) as 支付订单数
+        from fact_order o
+        join dim_user u on o.user_id = u.user_id
+        join dim_region r on u.region_id = r.region_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20251201 and 20251231
+          and r.area = '华南'
+      trap: 按用户常住地统计，订单的地区默认指收货地
+      expect:
+        tables: [fact_order, dim_region]
+        metrics: [支付订单数]
+        values: [华南]
+      order_matters: false
+    - question: 那最近的呢？
+      gold_intent: clarify
+      clarify_reply: 最近 7 天
+      gold_standalone: 最近 7 天华南大区的支付订单数是多少？
+      gold_sql: |
+        select count(*) as 支付订单数
+        from fact_order o
+        join dim_region r on o.receiver_region_id = r.region_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20251225 and 20251231
+          and r.area = '华南'
+      trap_sql: |
+        select count(*) as 支付订单数
+        from fact_order o
+        join dim_region r on o.receiver_region_id = r.region_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20251202 and 20251231
+          and r.area = '华南'
+      trap: “最近”没有给出范围，没有反问就自行假设成最近 30 天
+      expect:
+        tables: [fact_order, dim_region]
+        metrics: [支付订单数]
+        values: [华南]
+      order_matters: false
+
+- id: mt_clarify_02
+  category: clarify
+  tags: [多轮, 反问, 指代, 品牌]
+  difficulty: hard
+  today: "2025-12-31"
+  turns:
+    - question: 2025 年销售额最高的 3 个品牌
+      gold_sql: |
+        select k.brand_name as 品牌, sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by k.brand_name
+        order by 销售额 desc
+        limit 3
+      trap_sql: |
+        select k.brand_name as 品牌, sum(o.order_amount) as 销售额
+        from fact_order o
+        join fact_order_item i on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        where o.pay_time is not null
+          and o.pay_date_id between 20250101 and 20251231
+        group by k.brand_name
+        order by 销售额 desc
+        limit 3
+      trap: 订单金额关联明细后求和，订单被重复计算
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku]
+        metrics: [支付金额]
+      order_matters: true
+    - question: 那个品牌每个月卖了多少钱？
+      gold_intent: clarify
+      clarify_reply: 苹果
+      gold_standalone: 2025 年苹果品牌每个月的销售额
+      gold_sql: |
+        select d.month as 月份, sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_date d on o.pay_date_id = d.date_id
+        where o.pay_time is not null
+          and d.year = 2025
+          and k.brand_name = '苹果'
+        group by d.month
+      trap_sql: |
+        select d.month as 月份, sum(i.pay_amount) as 销售额
+        from fact_order_item i
+        join fact_order o on i.order_id = o.order_id
+        join dim_sku k on i.sku_id = k.sku_id
+        join dim_date d on o.pay_date_id = d.date_id
+        where o.pay_time is not null
+          and d.year = 2025
+          and k.brand_name = '小米'
+        group by d.month
+      trap: 上文有三个品牌，没有反问就默认成了第一名小米
+      expect:
+        tables: [fact_order, fact_order_item, dim_sku]
+        metrics: [支付金额]
+        values: [苹果]
       order_matters: false

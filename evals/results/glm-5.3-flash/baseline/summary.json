@@ -1,0 +1,200 @@
+{
+  "meta": {
+    "run_id": "20261126-141202",
+    "predictor": "agent",
+    "dataset": "evals/datasets/traps.yaml",
+    "examples": true,
+    "semantic_check": true,
+    "llm_model": "glm-5.3-flash",
+    "llm_cache": {
+      "hits": 589,
+      "misses": 16
+    }
+  },
+  "total": 100,
+  "passed": 91,
+  "accuracy": 0.91,
+  "must_pass_failed": [
+    "activity_01"
+  ],
+  "by_category": {
+    "activity": {
+      "total": 10,
+      "passed": 8,
+      "accuracy": 0.8
+    },
+    "date_role": {
+      "total": 10,
+      "passed": 10,
+      "accuracy": 1.0
+    },
+    "distinct": {
+      "total": 10,
+      "passed": 10,
+      "accuracy": 1.0
+    },
+    "fanout": {
+      "total": 10,
+      "passed": 8,
+      "accuracy": 0.8
+    },
+    "funnel": {
+      "total": 10,
+      "passed": 9,
+      "accuracy": 0.9
+    },
+    "order_vs_pay": {
+      "total": 10,
+      "passed": 10,
+      "accuracy": 1.0
+    },
+    "refund": {
+      "total": 10,
+      "passed": 10,
+      "accuracy": 1.0
+    },
+    "region_role": {
+      "total": 10,
+      "passed": 10,
+      "accuracy": 1.0
+    },
+    "relative_time": {
+      "total": 10,
+      "passed": 7,
+      "accuracy": 0.7
+    },
+    "snowflake": {
+      "total": 10,
+      "passed": 9,
+      "accuracy": 0.9
+    }
+  },
+  "by_difficulty": {
+    "easy": {
+      "total": 18,
+      "passed": 17,
+      "accuracy": 0.9444
+    },
+    "hard": {
+      "total": 28,
+      "passed": 26,
+      "accuracy": 0.9286
+    },
+    "medium": {
+      "total": 54,
+      "passed": 48,
+      "accuracy": 0.8889
+    }
+  },
+  "failure_stages": {
+    "结果不符": 6,
+    "过滤误删": 2,
+    "流程异常": 1
+  },
+  "avg_llm_calls": 6.05,
+  "avg_tokens": 19577.9,
+  "avg_seconds": 17.12,
+  "lint_flagged": 1,
+  "per_case": {
+    "order_vs_pay_01#question": true,
+    "order_vs_pay_01#paraphrase_1": true,
+    "order_vs_pay_02#question": true,
+    "order_vs_pay_02#paraphrase_1": true,
+    "order_vs_pay_03#question": true,
+    "order_vs_pay_03#paraphrase_1": true,
+    "order_vs_pay_04#question": true,
+    "order_vs_pay_04#paraphrase_1": true,
+    "order_vs_pay_05#question": true,
+    "order_vs_pay_05#paraphrase_1": true,
+    "fanout_01#question": true,
+    "fanout_01#paraphrase_1": true,
+    "fanout_02#question": true,
+    "fanout_02#paraphrase_1": true,
+    "fanout_03#question": true,
+    "fanout_03#paraphrase_1": true,
+    "fanout_04#question": false,
+    "fanout_04#paraphrase_1": false,
+    "fanout_05#question": true,
+    "fanout_05#paraphrase_1": true,
+    "refund_01#question": true,
+    "refund_01#paraphrase_1": true,
+    "refund_02#question": true,
+    "refund_02#paraphrase_1": true,
+    "refund_03#question": true,
+    "refund_03#paraphrase_1": true,
+    "refund_04#question": true,
+    "refund_04#paraphrase_1": true,
+    "refund_05#question": true,
+    "refund_05#paraphrase_1": true,
+    "date_role_01#question": true,
+    "date_role_01#paraphrase_1": true,
+    "date_role_02#question": true,
+    "date_role_02#paraphrase_1": true,
+    "date_role_03#question": true,
+    "date_role_03#paraphrase_1": true,
+    "date_role_04#question": true,
+    "date_role_04#paraphrase_1": true,
+    "date_role_05#question": true,
+    "date_role_05#paraphrase_1": true,
+    "region_role_01#question": true,
+    "region_role_01#paraphrase_1": true,
+    "region_role_02#question": true,
+    "region_role_02#paraphrase_1": true,
+    "region_role_03#question": true,
+    "region_role_03#paraphrase_1": true,
+    "region_role_04#question": true,
+    "region_role_04#paraphrase_1": true,
+    "region_role_05#question": true,
+    "region_role_05#paraphrase_1": true,
+    "snowflake_01#question": true,
+    "snowflake_01#paraphrase_1": true,
+    "snowflake_02#question": true,
+    "snowflake_02#paraphrase_1": true,
+    "snowflake_03#question": true,
+    "snowflake_03#paraphrase_1": false,
+    "snowflake_04#question": true,
+    "snowflake_04#paraphrase_1": true,
+    "snowflake_05#question": true,
+    "snowflake_05#paraphrase_1": true,
+    "distinct_01#question": true,
+    "distinct_01#paraphrase_1": true,
+    "distinct_02#question": true,
+    "distinct_02#paraphrase_1": true,
+    "distinct_03#question": true,
+    "distinct_03#paraphrase_1": true,
+    "distinct_04#question": true,
+    "distinct_04#paraphrase_1": true,
+    "distinct_05#question": true,
+    "distinct_05#paraphrase_1": true,
+    "activity_01#question": false,
+    "activity_01#paraphrase_1": false,
+    "activity_02#question": true,
+    "activity_02#paraphrase_1": true,
+    "activity_03#question": true,
+    "activity_03#paraphrase_1": true,
+    "activity_04#question": true,
+    "activity_04#paraphrase_1": true,
+    "activity_05#question": true,
+    "activity_05#paraphrase_1": true,
+    "relative_time_01#question": true,
+    "relative_time_01#paraphrase_1": true,
+    "relative_time_02#question": true,
+    "relative_time_02#paraphrase_1": false,
+    "relative_time_03#question": true,
+    "relative_time_03#paraphrase_1": true,
+    "relative_time_04#question": true,
+    "relative_time_04#paraphrase_1": false,
+    "relative_time_05#question": true,
+    "relative_time_05#paraphrase_1": false,
+    "funnel_01#question": true,
+    "funnel_01#paraphrase_1": true,
+    "funnel_02#question": true,
+    "funnel_02#paraphrase_1": true,
+    "funnel_03#question": true,
+    "funnel_03#paraphrase_1": false,
+    "funnel_04#question": true,
+    "funnel_04#paraphrase_1": true,
+    "funnel_05#question": true,
+    "funnel_05#paraphrase_1": true
+  }
+}

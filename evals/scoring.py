@@ -247,6 +247,8 @@ class TurnResult(CaseResult):
     intent: str | None = None  # 模型判断的意图；不经过改写环节时为 None
     gold_standalone: str | None = None
     standalone: str | None = None  # 模型改写后的问题
+    answer: str | None = None  # 直接基于上一轮结果回答的文本（没有 SQL）
+    clarify_question: str | None = None  # 模型反问的问题；没有反问时为 None
 
     @property
     def intent_correct(self) -> bool | None:
@@ -322,6 +324,9 @@ def summarize_dialogs(results: list[TurnResult]) -> dict:
         "total": total,
         "passed": passed,
         "accuracy": _rate(passed, total),
+        # 直接基于上一轮结果回答的轮数、发起反问的轮数（含不该问却问了的）
+        "answered_turns": sum(bool(r.answer and not r.sql) for r in results),
+        "clarify_turns": sum(bool(r.clarify_question) for r in results),
         "followup_total": len(followups),
         "followup_passed": sum(r.passed for r in followups),
         "followup_accuracy": _rate(sum(r.passed for r in followups), len(followups)),
@@ -380,6 +385,7 @@ def render_dialog_markdown(
         ),
         f"- 必过对话失败：{', '.join(summary['must_pass_failed']) or '无'}",
         f"- 每轮平均 LLM 调用 {summary['avg_llm_calls']} 次、{summary['avg_tokens']} tokens、耗时 {summary['avg_seconds']} 秒",
+        f"- 直接基于上一轮结果回答 {summary.get('answered_turns', 0)} 轮，发起反问 {summary.get('clarify_turns', 0)} 轮",
         "",
     ]
     if mode == MODE_TEACHER:
@@ -431,9 +437,12 @@ def render_dialog_markdown(
         for r in failed:
             note = (
                 r.error
+                or (f"回答：{r.answer}" if r.answer else "")
                 or "; ".join((r.recall_missing or []) + (r.filter_missing or []))
                 or "; ".join(r.lint_issues)
             )
+            if r.clarify_question:
+                note = f"反问：{r.clarify_question}；{note}"
             rewrite = (
                 f"{r.standalone} / {r.gold_standalone}"
                 if r.standalone is not None and r.turn > 1
