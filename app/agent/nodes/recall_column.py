@@ -48,11 +48,11 @@ async def recall_column(state: DataAgentState, runtime: Runtime[DataAgentContext
 
         result = await chain.ainvoke({"query": query})
 
-        # 原始关键词和 LLM 扩展词一起参与召回；set 去重，避免重复请求同一关键词
-        keywords = set(keywords + result)
+        # 原始关键词和 LLM 扩展词一起参与召回；保序去重，避免重复请求同一关键词，
+        # 也保证每次运行的检索顺序一致（set 的顺序不固定，会让提示词变化、评测不可复现）
+        keywords = list(dict.fromkeys(keywords + result))
 
         # 所有检索词一次批量向量化，再并发检索，避免逐词串行等待网络往返
-        keywords = list(keywords)
         embeddings = await embedding_client.aembed_documents(keywords)
         search_results: list[list[ColumnInfo]] = await asyncio.gather(
             *(column_qdrant_repository.search(embedding) for embedding in embeddings)
