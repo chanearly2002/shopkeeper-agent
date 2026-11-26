@@ -82,7 +82,7 @@ extract_keywords ─┬─ recall_column    ─┐
 | 模块 | 技术 |
 | --- | --- |
 | 智能体编排 | LangGraph、LangChain |
-| 大模型 | 任意兼容 OpenAI 接口的模型（默认通过硅基流动调用） |
+| 大模型 | 任意兼容 OpenAI 接口的模型（默认用智谱开放平台的 glm-5.3-flash） |
 | Embedding | TEI + `BAAI/bge-large-zh-v1.5`（1024 维） |
 | 向量检索 | Qdrant |
 | 全文检索 | Elasticsearch 8.19 + IK 分词 |
@@ -110,9 +110,10 @@ shopkeeper-agent/
 │   ├── scripts/          # 示例数据生成、元数据知识库构建脚本
 │   └── services/         # 知识库构建服务、问数查询服务
 ├── conf/                 # app_config.yaml（运行配置）、meta_config.yaml（元数据与术语）、sql_examples.yaml（已验证示例）
-├── docker/               # Docker Compose、MySQL 初始化 SQL、ES IK 插件
+├── docker/               # Docker Compose、MySQL 初始化 SQL、ES IK 插件、数仓 SQL 快照
 ├── docs/                 # 设计文档
-├── evals/                # 评测集与结果判定
+├── evals/                # 评测集、判分、评测 runner
+├── notebooks/            # 数仓探查 notebook
 ├── frontend/             # React 前端
 ├── prompts/              # 各节点的 Prompt 模板
 ├── tests/                # 单元测试
@@ -141,7 +142,7 @@ cp .env.example .env
 LLM_API_KEY=your_real_api_key
 ```
 
-默认使用兼容 OpenAI 接口的硅基流动服务。换用其他平台时，修改 `conf/app_config.yaml` 中 `llm` 段的 `model_name` 和 `base_url`。
+默认使用智谱开放平台的 `glm-5.3-flash`（OpenAI 兼容接口），`LLM_API_KEY` 填智谱的 key。换用其他平台时，修改 `conf/app_config.yaml` 中 `llm` 段的 `model_name` 和 `base_url`。
 
 ### 3. 下载 Embedding 模型
 
@@ -277,7 +278,7 @@ pnpm dev
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `llm.model_name` / `llm.base_url` | GLM-5.1 / 硅基流动 | 大模型，需兼容 OpenAI 接口 |
+| `llm.model_name` / `llm.base_url` | `glm-5.3-flash` / 智谱开放平台 | 大模型，需兼容 OpenAI 接口 |
 | `qdrant.score_threshold` / `qdrant.limit` | 0.6 / 20 | 字段和指标召回的余弦相似度阈值与条数 |
 | `es.min_score` / `es.limit` | 2.0 / 20 | 取值召回的 BM25 得分阈值与条数（未归一化，需按数据标定） |
 | `agent.max_correct_attempts` | 2 | SQL 校验失败后的最多修正次数 |
@@ -300,6 +301,8 @@ uv run python -m evals.runner          # 问数 Agent 答题打分（需要 LLM�
 uv run python -m evals.runner --multiturn teacher   # 多轮追问评测（free 为整段自由对话）
 cd frontend && pnpm lint    # 前端类型检查
 ```
+
+`notebooks/dw_explore.ipynb` 用来探查数仓：表与字段、指标口径速算、对账与外键自检、常见分析写法。依赖不在默认安装里，先运行 `uv sync --group notebook`。
 
 架构说明、开发约定和已知问题见 [CLAUDE.md](CLAUDE.md)。
 

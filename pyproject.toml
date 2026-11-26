@@ -27,13 +27,17 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "ipykernel>=7.4.0",
-    "mysql-connector-python>=26.10.0",
-    "pandas>=3.1.1",
     "pre-commit>=4.3.0",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",
     "ruff>=0.11.0",
+]
+
+# 探查数仓、阅读评测结果用的 notebook 依赖，按需安装：uv sync --group notebook
+notebook = [
+    "ipykernel>=7.4.0",
+    "mysql-connector-python>=26.10.0",
+    "pandas>=3.1.1",
 ]
 
 [tool.ruff]

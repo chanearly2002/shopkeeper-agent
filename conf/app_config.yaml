@@ -51,7 +51,7 @@ es:
   limit: 20
 
 llm:
-  # 本地改动：改用智谱开放平台 glm-5.3-flash（原配置为硅基流动 Pro/zai-org/GLM-5.1）
+  # 智谱开放平台（OpenAI 兼容接口）；换平台只改 model_name 和 base_url，key 放 .env 的 LLM_API_KEY
   model_name: glm-5.3-flash
   api_key: ${oc.env:LLM_API_KEY}
   base_url: https://open.bigmodel.cn/api/paas/v4/
