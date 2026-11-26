@@ -56,7 +56,9 @@ services:
       - "8081:80"
     environment:
       MODEL_ID: /models/bge-large-zh-v1.5
-      MAX_CONCURRENT_REQUESTS: "16"
+      # bge-large-zh-v1.5 只有 pytorch 权重、没有 ONNX，TEI 会退回 candle 后端，一批只算 4 条；
+      # 并发上限太小（原为 16）时，知识库构建一次发 20 条就会让 TEI 队列溢出 panic 并重启
+      MAX_CONCURRENT_REQUESTS: "512"
       MAX_BATCH_TOKENS: "16384"
     volumes:
       - ./embedding/bge-large-zh-v1.5:/models/bge-large-zh-v1.5

@@ -42,6 +42,9 @@ uv run python -m app.agent.llm                 # 验证 LLM 配置
 uv run python -m app.clients.mysql_client_manager      # 各 client manager 都带 __main__ 冒烟脚本
 uv run python -m app.clients.embedding_client_manager
 
+# notebook（数仓探查、评测教程）
+uv sync --group notebook                       # 安装 pandas、ipykernel、mysql-connector（不在默认的 dev 组里）
+
 # 前端
 cd frontend && pnpm install
 pnpm dev                                       # http://localhost:5173，/api 代理到 127.0.0.1:8000
@@ -141,7 +144,7 @@ extract_keywords ─┬─ recall_column    ─┐
 - `SessionState` / `Turn`（同在 `state.py`）：会话图的状态，见上一节；`history` 是唯一带 reducer 的字段
 - `DataAgentState`（`app/agent/state.py`，TypedDict，**没有任何 reducer**）：单轮图节点间传递的业务数据。并行节点必须写互不相同的 key，否则 LangGraph 会报并发更新冲突；要让多个并行节点写同一个 key，需要给该字段加 `Annotated[..., reducer]`
 - `DataAgentContext`（`app/agent/context.py`）：仓储、Embedding 客户端等外部依赖，节点通过 `runtime.context[...]` 取用，不放进 State（也就不进检查点）；会话图和单轮图共用同一个 context。组装统一走 `QueryService.from_sessions(meta_session, dw_session).build_context()`（调试入口和评测 runner 都用它），HTTP 接口走 `api/dependencies.py`
-- LLM 是 `app/agent/llm.py` 的模块级单例（`init_chat_model(model_provider="openai")`，`temperature=0`），节点直接 `import llm`，换 OpenAI 兼容平台只改 `conf/app_config.yaml` 的 `llm` 段
+- LLM 是 `app/agent/llm.py` 的模块级单例（`init_chat_model(model_provider="openai")`，`temperature=0`），节点直接 `import llm`；默认是智谱开放平台的 `glm-5.3-flash`（`https://open.bigmodel.cn/api/paas/v4/`），换 OpenAI 兼容平台只改 `conf/app_config.yaml` 的 `llm` 段
 
 ### SSE 协议（前后端契约）
 
@@ -175,6 +178,7 @@ extract_keywords ─┬─ recall_column    ─┐
 
 ## 开发约定
 
+- **每次改动都要同步更新 `CLAUDE.md` 和 `README.md`**：新增或改名的命令、配置项、目录、接口、已知问题，都在同一个提交里写进文档
 - 每个 `.py` 文件以中文模块 docstring 开头说明职责，函数有一句话 docstring，行内注释解释“为什么”。新代码保持这个风格
 - 节点统一写法：`async def node(state: DataAgentState, runtime: Runtime[DataAgentContext])`；开头发 `running`，成功发 `success`，`except` 里 `logger.error` + 发 `error` 后 `raise`；返回只包含本节点更新的 key 的 dict
 - 日志统一 `from app.core.log import logger`（loguru，自动带 request_id），不要用 `print` 或标准库 `logging`
@@ -203,6 +207,7 @@ extract_keywords ─┬─ recall_column    ─┐
 - **新增配置项**：`conf/app_config.yaml` + `app/conf/app_config.py` 的 dataclass 两处同时改
 - **Meta 库加表/加列**：`docker/mysql/meta.sql` + `app/models/` + `app/entities/` + mapper + `MetaMySQLRepository`。没有迁移工具，`meta.sql` 只在 MySQL 卷首次初始化时执行，已有数据卷需要 `docker compose -f docker/docker-compose.yaml down -v` 重建或手动 `ALTER TABLE`（例如 `ref_column` 列：`ALTER TABLE meta.column_info ADD COLUMN ref_column VARCHAR(128)`）
 - **新增接口**：`app/api/routers/` 新建 router，在 `main.py` `include_router`
+- **notebook**：放 `notebooks/`，依赖加到 `pyproject.toml` 的 `notebook` 组（不要加进 `dev`）；提交前 `uv run ruff check notebooks` 和 `uv run ruff format notebooks`（ruff 会检查 `.ipynb`），草稿类 notebook 清空输出再提交
 
 ## 评测集（`evals/`）
 
@@ -222,7 +227,8 @@ extract_keywords ─┬─ recall_column    ─┐
 
 **运行环境（暂不处理）**
 - 没有 `LLM_API_KEY` 时，任何 `import app.conf.app_config` 的模块（几乎全部）都会在导入阶段报 OmegaConf 插值错误。只做静态检查时可临时 `LLM_API_KEY=dummy uv run ...`；`tests/` 下的测试刻意不导入配置
-- 所有服务地址、MySQL 账号密码都硬编码在 `conf/app_config.yaml` 和 compose 文件里，默认全部是 `localhost`；数仓账号 `didilili` 对 `dw` 有全部权限，只读完全靠程序侧的 `ensure_readonly`
+- 所有服务地址、MySQL 账号密码都硬编码在 `conf/app_config.yaml` 和 compose 文件里；MySQL 地址是 `127.0.0.1`（避免 `localhost` 解析到 IPv6 或走 socket），其余服务是 `localhost`；MySQL 账号 `early`（密码 `dili123`）对 `dw` 和 `meta` 有全部权限，只读完全靠程序侧的 `ensure_readonly`
+- 改了 MySQL 账号（compose 的 `MYSQL_USER`、`dw.sql` / `meta.sql` 的 GRANT、`app_config.yaml` 三处要一致）后，已有数据卷要 `docker compose -f docker/docker-compose.yaml down -v` 重建，初始化脚本只在卷第一次创建时执行
 
 **SQL 闭环**
 - `ensure_readonly` 基于 sqlglot 的 MySQL 方言解析，sqlglot 解析不了的合法 MySQL 语法会被当作“无法解析”拒绝，然后进入修正流程
@@ -254,3 +260,5 @@ extract_keywords ─┬─ recall_column    ─┐
 - ES 节点磁盘使用率超过 90% 时会拒绝分配分片（集群 red，构建报 503）；本地开发可执行
   `curl -XPUT localhost:9200/_cluster/settings -H 'content-type: application/json' -d '{"persistent":{"cluster.routing.allocation.disk.threshold_enabled":false}}'`
 - ES 的 IK 插件 zip 必须和 ES 版本完全一致（当前 8.19.10）
+- TEI：`bge-large-zh-v1.5` 只有 `pytorch_model.bin`、没有 ONNX，启动日志里的 `Could not start ORT backend` 是正常的，会退回 candle 后端（一批最多 4 条）。`MAX_CONCURRENT_REQUESTS` 不能设太小：原来的 16 会在知识库构建一次发 20 条时让 TEI 队列溢出 panic 并重启（构建报 `Server disconnected`），现为 512。单次请求最多 32 条（TEI 默认），超过返回 413
+- 模型下载：`hf download` 的大文件走 `us.aws.cdn.hf.co`，网络有白名单时要一并放行
