@@ -10,16 +10,16 @@ logging:
     level: INFO
 
 db_meta:
-  host: localhost
+  host: 127.0.0.1
   port: 3306
-  user: didilili
+  user: early
   password: dili123
   database: meta
 
 db_dw:
-  host: localhost
+  host: 127.0.0.1
   port: 3306
-  user: didilili
+  user: early
   password: dili123
   database: dw
 
@@ -51,9 +51,10 @@ es:
   limit: 20
 
 llm:
-  model_name: Pro/zai-org/GLM-5.1
+  # 本地改动：改用智谱开放平台 glm-5.3-flash（原配置为硅基流动 Pro/zai-org/GLM-5.1）
+  model_name: glm-5.3-flash
   api_key: ${oc.env:LLM_API_KEY}
-  base_url: https://api.siliconflow.cn/v1
+  base_url: https://open.bigmodel.cn/api/paas/v4/
 
 knowledge:
   # 业务术语和已验证问答示例各自的 Qdrant 集合
