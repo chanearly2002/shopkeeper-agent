@@ -213,7 +213,7 @@ extract_keywords ─┬─ recall_column    ─┐
 
 - `evals/datasets/traps.yaml`：10 类业务口径陷阱 × 5 题（下单与支付口径、订单头/明细扇出、退款扣减、日期角色、地区角色、雪花关联、去重计数、活动归因、相对时间、漏斗分母），“今天”统一是 2025-12-31。每题有标准 SQL `gold_sql`、典型错误写法 `trap_sql` 及其说明、用于归因的 `expect`（表 / 指标 / 取值）
 - 题目口径以 `meta_config.yaml` 的指标定义为准：“销售额”= 支付金额（`pay_time IS NOT NULL`，按 `pay_date_id` 筛时间）；按商品/类目/品牌/活动拆分金额用明细 `pay_amount`；退款只认“退款成功”
-- `evals/compare.py`：结果等价判定（忽略列名和列顺序、允许多出列、数值相对误差 1e-9、接受预测值四舍五入到 1~4 位小数、比率列允许 ×100、只有 `order_matters` 才比较行顺序），`tests/test_compare.py` 覆盖每条规则
+- `evals/compare.py`：结果等价判定（忽略列名和列顺序、允许多出列、数值相对误差 1e-9、接受预测值四舍五入到 1~4 位小数、比率列允许 ×100、只有 `order_matters` 才比较行顺序；时间标签换算：整列是同一年的“年月”标签（`'2025-01'`、`202501`、`'2025年1月'`）时可按月份数字与标准列比较，日期 `'2025-12-25'` 与日期键 `20251225` 互认），`tests/test_compare.py` 覆盖每条规则。放宽判分规则后必须重跑 `check_dataset` 和 `--predictor trap`，确认没有把错误写法判对
 - `evals/dataset.py`：不连库的静态检查（pytest 会跑）；`evals/check_dataset.py`：连数仓执行标准 SQL 和错误写法
 - 评测题依赖生成数据：**改了 `dw_generator.py` 或数据规模后必须重跑 `check_dataset`**，个别题的区分度可能因此消失（例如 `date_role_01` 只差 1 单）
 - `evals/runner.py`：答题打分。`--predictor agent` 用问数图答题，并通过 `graph.astream(stream_mode=["updates", "custom"])` 捕获每个节点的输出做归因（召回遗漏 → 过滤误删 → SQL 不可执行 → 结果不符，`evals/scoring.py`）；`gold` / `trap` 用标准 SQL / 错误写法作答，应分别为 100% / 0%，用来自检打分逻辑。支持 `--paraphrases`、`--no-examples`、`--no-semantic-check`、`--llm-cache`（`evals/llm_cache.py`，sqlite 录制回放）、`--baseline` / `--save-baseline`（退化时退出码 1）。报告在 `evals/reports/`（已 gitignore）
