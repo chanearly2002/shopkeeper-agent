@@ -1,7 +1,7 @@
 """
 会话记忆节点
 
-把本轮的原话、改写后的问题、意图、SQL、结果预览和“今天”追加到会话历史，
+把本轮的原话、改写后的问题、意图、SQL、结果预览、直接回答、反问后的补充和“今天”追加到会话历史，
 由外层会话图的 checkpointer 按 thread_id 持久化，供下一轮改写引用
 """
 
@@ -21,6 +21,8 @@ async def remember(state: SessionState, runtime: Runtime[DataAgentContext]):
         sql=state.get("sql"),
         result_preview=state.get("result_preview"),
         error=state.get("error"),
+        answer=state.get("answer"),
+        clarification=state.get("clarification"),
         today=state["today"],
     )
     return {"history": [turn]}

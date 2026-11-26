@@ -3,15 +3,19 @@
 
 外层会话图 + 内层单轮流水线（方案见 docs/design/borrowing-and-roadmap.md 第四节）：
 
-    START ─ contextualize ─ run_pipeline ─ remember ─ END
+    START ─ contextualize ─┬─(clarify)──────────── ask_clarification ─(interrupt / resume)─► contextualize
+                           ├─(result_qa 且有上轮结果)─ answer_from_result ─┬─(答出)──────────────► remember ─ END
+                           │                                              └─(答不了)─► run_pipeline ─┘
+                           └─(new / followup / 其他)─────────────────────────────────► run_pipeline ─► remember
 
-- contextualize：把追问改写成独立问题并判断意图（首轮跳过 LLM）
-- run_pipeline：以普通调用方式运行现有单轮问数图，转发它的进度和结果事件
-- remember：把本轮问题、改写、SQL、结果预览追加到会话历史
+- contextualize：把追问改写成独立问题并判断意图（首轮默认跳过 LLM）
+- ask_clarification：信息不足时 interrupt() 反问用户，回答后回到 contextualize（每轮最多一次）
+- answer_from_result：针对上一轮结果的提问，结果不大时直接回答、不查库；答不了就退回查库
+- run_pipeline：以普通调用方式运行现有单轮问数图，追问时带上上一轮 SQL 作参考
+- remember：把本轮问题、改写、SQL、结果预览或回答追加到会话历史
 
-checkpointer 只挂在这一层，按 thread_id 保存会话历史；单轮图编译时关闭了 checkpointer，
-中间状态不进检查点。当前用进程内的 InMemorySaver，服务重启后会话丢失，后续换成 MySQL 持久化
-result_qa 目前也走单轮流水线重新查库，后续再加 answer_from_result 分支直接基于上一轮结果回答
+checkpointer 只挂在这一层，按 thread_id 保存会话历史，也是 interrupt 暂停与恢复的前提；
+单轮图编译时关闭了 checkpointer，中间状态不进检查点。当前用进程内的 InMemorySaver，服务重启后会话丢失
 """
 
 import asyncio
@@ -23,20 +27,48 @@ from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 
 from app.agent.context import DataAgentContext
+from app.agent.nodes.answer_from_result import answer_from_result
+from app.agent.nodes.ask_clarification import ask_clarification
 from app.agent.nodes.contextualize import contextualize
 from app.agent.nodes.remember import remember
 from app.agent.nodes.run_pipeline import run_pipeline
 from app.agent.state import SessionState
+from app.core.conversation import INTENT_CLARIFY, INTENT_RESULT_QA
+
+
+def route_after_contextualize(state: SessionState) -> str:
+    """按意图分流：反问、基于上一轮结果回答，或者查库"""
+    if state["intent"] == INTENT_CLARIFY:
+        return "ask_clarification"
+    if state["intent"] == INTENT_RESULT_QA and state.get("last_result"):
+        return "answer_from_result"
+    return "run_pipeline"
+
+
+def route_after_answer(state: SessionState) -> str:
+    """直接回答成功就结束本轮，答不了就退回查库"""
+    return "remember" if state.get("answer") else "run_pipeline"
 
 
 def build_session_graph(checkpointer: BaseCheckpointSaver):
     """用给定的 checkpointer 编译会话图；评测 runner 可以传入自己的 checkpointer"""
     builder = StateGraph(state_schema=SessionState, context_schema=DataAgentContext)
     builder.add_node("contextualize", contextualize)
+    builder.add_node("ask_clarification", ask_clarification)
+    builder.add_node("answer_from_result", answer_from_result)
     builder.add_node("run_pipeline", run_pipeline)
     builder.add_node("remember", remember)
     builder.add_edge(START, "contextualize")
-    builder.add_edge("contextualize", "run_pipeline")
+    builder.add_conditional_edges(
+        "contextualize",
+        route_after_contextualize,
+        ["ask_clarification", "answer_from_result", "run_pipeline"],
+    )
+    # 用户回答反问后回到改写节点，结合回答重新理解问题
+    builder.add_edge("ask_clarification", "contextualize")
+    builder.add_conditional_edges(
+        "answer_from_result", route_after_answer, ["remember", "run_pipeline"]
+    )
     builder.add_edge("run_pipeline", "remember")
     builder.add_edge("remember", END)
     return builder.compile(checkpointer=checkpointer)

@@ -123,6 +123,9 @@ class ConversationConfig:
 
     history_turns: int
     result_preview_rows: int
+    answer_max_rows: int
+    enable_clarify: bool
+    contextualize_first_turn: bool
 
 
 @dataclass

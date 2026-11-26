@@ -34,6 +34,7 @@ async def query_handler(
             query.query,
             query.today.isoformat() if query.today else None,
             query.thread_id,
+            query.resume,
         ),
         media_type="text/event-stream",
     )

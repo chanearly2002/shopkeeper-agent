@@ -23,7 +23,7 @@ def test_trap_dataset_is_well_formed():
 
 def test_multiturn_dataset_is_well_formed():
     items = load_dataset(MULTITURN_DATASET)
-    assert len(items) == 20
+    assert len(items) == 22
     assert all(len(item["turns"]) >= 2 for item in items)
     assert check_structure(items, per_category=None) == []
     assert check_leakage(items, load_examples()) == []
@@ -49,7 +49,7 @@ def test_multiturn_intent_checks():
                 {
                     **base,
                     "question": "q3",
-                    "gold_intent": "clarify",
+                    "gold_intent": "chitchat",
                     "gold_standalone": "x",
                 },
                 {
@@ -61,7 +61,21 @@ def test_multiturn_intent_checks():
             ],
         }
     ]
+    items[0]["turns"].append(
+        {**base, "question": "q5", "gold_intent": "clarify", "gold_standalone": "x"}
+    )
+    items[0]["turns"].append(
+        {
+            **base,
+            "question": "q6",
+            "gold_intent": "followup",
+            "gold_standalone": "x",
+            "gold_answer_contains": ["华东"],
+        }
+    )
     errors = check_structure(items, per_category=None)
+    assert any("第 5 轮: clarify 轮缺少模拟用户回答" in e for e in errors)
+    assert any("第 6 轮: gold_answer_contains 只用于 result_qa 轮" in e for e in errors)
     assert any("第 1 轮: 首轮没有上文" in e for e in errors)
     assert any("第 2 轮: 追问轮缺少字段 gold_intent" in e for e in errors)
     assert any("第 2 轮: 追问轮缺少字段 gold_standalone" in e for e in errors)

@@ -5,9 +5,12 @@
 - 意图常量：改写节点输出的意图取值，评测集的 gold_intent 也用这些值
 - summarize_result：把一轮的查询结果压缩成“列名 + 行数 + 前几行”的预览，供下一轮改写引用
 - format_history：把最近几轮历史整理成提示词里的 YAML
-- parse_rewrite：校验和兜底改写节点的 LLM 输出
+- parse_rewrite：校验和兜底改写节点的 LLM 输出（含澄清问题和选项）
+- rows_for_answer / parse_answer：基于上一轮结果直接回答时的输入裁剪和输出校验
+- format_reference / merge_clarification：追问时的参考 SQL、澄清回答的拼接
 """
 
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
@@ -18,10 +21,14 @@ import yaml
 INTENT_NEW = "new"
 # 依赖上文的追问：省略、追加条件、换维度、纠正口径、引用上一轮结果里的实体继续查
 INTENT_FOLLOWUP = "followup"
-# 针对上一轮结果本身的提问（哪个最高、差多少）；目前仍改写成独立问题重新查库，
-# 后续由 answer_from_result 直接基于上一轮结果回答
+# 针对上一轮结果本身的提问（哪个最高、差多少）；上一轮结果不大时由 answer_from_result
+# 直接基于结果回答，否则改写成独立问题重新查库
 INTENT_RESULT_QA = "result_qa"
-INTENTS = (INTENT_NEW, INTENT_FOLLOWUP, INTENT_RESULT_QA)
+# 信息不足、存在多种理解且结果会明显不同时，先反问用户（interrupt），拿到回答后再改写
+INTENT_CLARIFY = "clarify"
+INTENTS = (INTENT_NEW, INTENT_FOLLOWUP, INTENT_RESULT_QA, INTENT_CLARIFY)
+# 澄清问题最多给几个选项，前端按钮放得下
+MAX_CLARIFY_OPTIONS = 4
 
 
 def to_plain(value: Any) -> Any:
@@ -72,6 +79,9 @@ def format_history(history: list[dict], max_turns: int = 3) -> str:
         }
         if turn.get("error"):
             item["结果"] = f"查询失败：{turn['error']}"
+        elif turn.get("answer"):
+            # 基于上一轮结果直接回答的轮次没有 SQL，把回答给下一轮参考
+            item["回答"] = turn["answer"]
         else:
             if turn.get("sql"):
                 # 去掉行尾空白，否则 YAML 无法用块样式输出多行 SQL
@@ -107,12 +117,23 @@ _HistoryDumper.add_representer(
 )
 
 
-def parse_rewrite(output: Any, user_input: str) -> tuple[str, str]:
+@dataclass
+class Rewrite:
+    """改写节点的输出：意图、独立问题，以及意图为 clarify 时的澄清问题和选项"""
+
+    intent: str
+    standalone: str
+    clarify_question: str | None = None
+    options: list[str] = field(default_factory=list)
+
+
+def parse_rewrite(output: Any, user_input: str, allow_clarify: bool = True) -> Rewrite:
     """
-    校验改写节点的 LLM 输出，返回 (intent, standalone_question)
+    校验改写节点的 LLM 输出
 
     意图不在取值范围内时按追问处理（有上文时追问是更安全的假设）；
-    改写结果为空时退回用户原话，保证下游始终拿到一个可用的问题
+    改写结果为空时退回用户原话，保证下游始终拿到一个可用的问题；
+    不允许澄清（已经澄清过一次或功能关闭）或没给出澄清问题时，clarify 降级为追问
     """
     if not isinstance(output, dict):
         raise ValueError(f"改写结果不是 JSON 对象：{output!r}")
@@ -120,7 +141,56 @@ def parse_rewrite(output: Any, user_input: str) -> tuple[str, str]:
     if intent not in INTENTS:
         intent = INTENT_FOLLOWUP
     standalone = str(output.get("standalone_question") or "").strip()
+    question = str(output.get("clarify_question") or "").strip()
+    if intent == INTENT_CLARIFY and (not allow_clarify or not question):
+        intent = INTENT_FOLLOWUP
     if intent == INTENT_NEW or not standalone:
         # 新问题必须原样保留，防止模型把上文条件“好心”带进来
         standalone = user_input.strip()
-    return intent, standalone
+    if intent != INTENT_CLARIFY:
+        return Rewrite(intent, standalone)
+    raw_options = output.get("options") or []
+    options = [str(o).strip() for o in raw_options if isinstance(o, (str, int, float))]
+    options = list(dict.fromkeys(o for o in options if o))[:MAX_CLARIFY_OPTIONS]
+    return Rewrite(intent, standalone, question, options)
+
+
+def merge_clarification(user_input: str, reply: str) -> str:
+    """把用户对澄清问题的回答拼到原话后面，交给改写节点重新理解"""
+    return f"{user_input.strip()}（补充：{reply.strip()}）"
+
+
+def format_reference(question: str | None, sql: str | None) -> str:
+    """
+    追问时给 SQL 生成节点的参考：上一轮的问题和 SQL；没有时返回空串
+
+    返回值自带前后换行，模板里放在示例和任务要求之间：为空时提示词与单轮完全相同，
+    单轮查询的提示词和 LLM 缓存都不受影响
+    """
+    if not sql:
+        return ""
+    return (
+        "\n上一轮的问题和 SQL（本轮是在它基础上的追问：表关联方式、口径和过滤条件优先沿用，"
+        "只按本轮问题做必要修改；与本轮问题无关的条件不要保留）：\n"
+        f"问题：{question or ''}\n{sql.strip()}\n"
+    )
+
+
+def rows_for_answer(
+    rows: list[dict], truncated: bool, max_rows: int
+) -> list[dict] | None:
+    """
+    上一轮结果能否用来直接回答：被截断或超过 max_rows 行时不行（返回 None），
+    否则返回转成基础类型的全部行，可以直接写进 checkpointer
+    """
+    if truncated or not rows or len(rows) > max_rows:
+        return None
+    return [{k: to_plain(v) for k, v in row.items()} for row in rows]
+
+
+def parse_answer(output: Any) -> str | None:
+    """校验结果问答节点的输出：能回答时返回回答文本，不能回答或格式不对时返回 None"""
+    if not isinstance(output, dict) or not output.get("answerable"):
+        return None
+    answer = str(output.get("answer") or "").strip()
+    return answer or None

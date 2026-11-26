@@ -85,6 +85,12 @@ conversation:
   history_turns: 3
   # 每轮结果在会话记忆里保留的行数（另记列名、总行数），供追问引用“第一名”等结果
   result_preview_rows: 5
+  # 针对上一轮结果的提问（哪个最高、占比多少），上一轮结果不超过这么多行时直接基于结果回答、不再查库
+  answer_max_rows: 200
+  # 信息不足以确定口径时是否反问用户（interrupt），每轮最多反问一次
+  enable_clarify: true
+  # 首轮是否也经过改写节点（多一次 LLM 调用）；开启后首轮问题也能触发反问澄清
+  contextualize_first_turn: false
 
 api:
   # 允许跨域访问后端的前端地址；同域部署或走 Vite 代理时不需要

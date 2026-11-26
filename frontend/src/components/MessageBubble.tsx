@@ -2,7 +2,7 @@
  * 聊天消息气泡组件
  * 组合展示用户问题、智能体回复、追问改写、执行流程和结果表格
  */
-import { Bot, Copy, PencilLine, UserRound } from "lucide-react";
+import { Bot, Copy, MessageCircleQuestion, PencilLine, UserRound } from "lucide-react";
 import { ResultTable } from "./ResultTable";
 import { StepRail } from "./StepRail";
 import { cn, formatTime, toClipboardText } from "../lib/format";
@@ -12,15 +12,25 @@ const intentLabels: Record<Intent, string> = {
   new: "新问题",
   followup: "追问",
   result_qa: "结果追问",
+  clarify: "反问",
 };
 
 type MessageBubbleProps = {
   message: ChatMessage;
   /** 用户认为改写有误时调用，参数是改写后的问题 */
   onCorrectRewrite?: (standaloneQuestion: string) => void;
+  /** 反问待回答时，点选项直接作为回答发送 */
+  onPickOption?: (option: string) => void;
+  /** 不回答反问，下一次输入当作新问题 */
+  onSkipClarify?: () => void;
 };
 
-export function MessageBubble({ message, onCorrectRewrite }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  onCorrectRewrite,
+  onPickOption,
+  onSkipClarify,
+}: MessageBubbleProps) {
   const isUser = message.role === "user";
 
   const copy = async () => {
@@ -81,6 +91,41 @@ export function MessageBubble({ message, onCorrectRewrite }: MessageBubbleProps)
               </button>
             )}
           </div>
+
+          {!isUser && message.clarify && (
+            <div className="mt-3 border border-brass/35 bg-brass/10 px-3 py-3 text-sm">
+              <div className="mb-2 flex items-center gap-2 font-semibold text-ink/80">
+                <MessageCircleQuestion className="h-4 w-4 text-brass" aria-hidden="true" />
+                {message.clarify.answered
+                  ? "已回答"
+                  : "需要先确认一下：点选项，或直接在输入框里回答"}
+              </div>
+              {message.clarify.options.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {message.clarify.options.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      disabled={!onPickOption}
+                      onClick={() => onPickOption?.(option)}
+                      className="border border-ink/15 bg-white/80 px-3 py-1.5 text-sm text-ink transition hover:border-moss/40 hover:bg-white focus:outline-none focus:ring-2 focus:ring-moss/40 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {onSkipClarify && (
+                <button
+                  type="button"
+                  onClick={onSkipClarify}
+                  className="mt-2 text-xs font-semibold text-ink/50 underline-offset-2 transition hover:text-ink hover:underline"
+                >
+                  跳过，直接提新问题
+                </button>
+              )}
+            </div>
+          )}
 
           {message.error && (
             <div className="mt-3 border border-tomato/30 bg-tomato/10 px-3 py-2 text-sm text-tomato">
