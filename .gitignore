@@ -63,4 +63,6 @@ docker/embedding/
 
 # 评测报告与 LLM 调用缓存
 /evals/reports/
-/evals/.cache/
+/evals/.cache/*
+# 录制好的 glm-5.3-flash 缓存随仓库提交，便于离线回放评测；其余缓存仍忽略
+!/evals/.cache/glm-5.3-flash.sqlite

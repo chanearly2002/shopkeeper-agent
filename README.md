@@ -306,6 +306,7 @@ uv run pytest               # 单元测试
 uv run python -m evals.check_dataset   # 在数仓上校验评测集与示例
 uv run python -m evals.runner          # 问数 Agent 答题打分（需要 LLM）
 uv run python -m evals.runner --multiturn teacher   # 多轮追问评测（free 为整段自由对话）
+uv run python -m evals.runner --llm-cache evals/.cache/glm-5.3-flash.sqlite   # 回放仓库里的录制缓存，不调用 LLM
 cd frontend && pnpm lint    # 前端类型检查
 ```
 
