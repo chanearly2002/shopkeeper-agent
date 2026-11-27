@@ -310,17 +310,18 @@ uv run python -m evals.runner --llm-cache evals/.cache/glm-5.3-flash.sqlite   # 
 cd frontend && pnpm lint    # 前端类型检查
 ```
 
-`notebooks/` 下有两本 notebook，依赖不在默认安装里，先运行 `uv sync --group notebook`：
+`notebooks/` 下有三本 notebook，依赖不在默认安装里，先运行 `uv sync --group notebook`：
 
 - `dw_explore.ipynb`：探查数仓，包括表与字段、指标口径速算、对账与外键自检、常见分析写法
 - `eval_tutorial.ipynb`：评测教程，讲评测的思路、判分规则、归因和回归门禁，并解读 `evals/results/glm-5.3-flash/` 里的真实评测结果
+- `eval_code_walkthrough.ipynb`：评测代码精读，逐个文件讲 `evals/` 的设计和工程手法，带着问题重读真实结果（置信区间、配对比较、失败是否独立、分数是否依赖运行日期），并列出精读中发现的评测代码问题和练习；不需要 LLM key
 
 架构说明、开发约定和已知问题见 [CLAUDE.md](CLAUDE.md)。
 
 ## 当前限制与规划
 
 - **多轮会话没有持久化**：追问改写、基于结果回答、反问澄清都已支持，但会话保存在进程内存里，服务重启即丢失，也没有会话列表和历史加载；首轮问题默认不会反问。
-- **评测**：已有 glm-5.3-flash 的基线（单轮 91%，原问法 96%、换问法 86%；多轮自由对话的追问轮 96%、整段对话成功率 91%），结果和解读见 `notebooks/eval_tutorial.ipynb`；还没有接入 CI。
+- **评测**：已有 glm-5.3-flash 的基线（单轮 91%，原问法 96%、换问法 86%；多轮自由对话的追问轮 96%、整段对话成功率 91%），结果和解读见 `notebooks/eval_tutorial.ipynb`；还没有接入 CI。评测代码本身有几处已知缺陷（基线门禁对基线里已失败的必过题也判退化、模型 SQL 里的 `CURDATE()` 让判分依赖运行日期等），见 `notebooks/eval_code_walkthrough.ipynb` 第 11 节，尚未修复。
 - **生产化能力**：权限控制、多租户、查询缓存、限流、监控告警等暂未涉及。
 
 开源项目借鉴评估、多轮问数（基于 LangGraph checkpointer）方案和后续路线见 [docs/design/borrowing-and-roadmap.md](docs/design/borrowing-and-roadmap.md)。

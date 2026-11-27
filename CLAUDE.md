@@ -230,6 +230,7 @@ extract_keywords ─┬─ recall_column    ─┐
 - `evals/multiturn.py`（`--multiturn teacher|free`）：用会话图逐轮作答，`subgraphs=True` 捕获单轮图节点输出做归因，意图判断错误归为“意图错误”（意图按第一次判断计，衡量该不该反问）。会话停在反问处时用 `clarify_reply` 恢复（不该问却问了时用默认回答“按你的理解直接查询”）。`teacher` 每轮新开会话、用标准答案（含标准 SQL 执行结果的预览，以及上一轮完整结果 `last_result`）填充历史；`free` 用同一个 thread_id。汇总 `summarize_dialogs`：意图准确率、追问轮准确率、整段对话成功率，`accuracy` / `per_case`（`id#轮次`）与单轮同名，可复用基线比较
 - 单轮 runner 仍直接调用单轮图（不经过会话图），单轮基线不受多轮改造影响；单轮模式会跳过多轮题
 - `notebooks/eval_tutorial.ipynb`：评测教程（思路、判分规则演示、在库自检、单题追踪、归因、真实结果解读、Windows 差异附录）。第 9～10 节读取 `evals/results/glm-5.3-flash/`
+- `notebooks/eval_code_walkthrough.ipynb`：评测代码精读（逐文件讲设计取舍、用小实验找判分器漏洞、带着问题重读真实结果、问题清单与练习）。用 `ast` 从源文件取代码展示，不导入 `app.conf.app_config`、不需要 LLM key；第 4 节和 10.5 节连数仓，连不上时跳过。改了 `evals/` 的函数名要同步检查它
 - `evals/results/<模型>/<实验名>/`：提交进仓库的真实评测结果（从 `evals/reports/<时间戳>/` 复制的 `summary.json`、`results.jsonl`、`summary.md`），实验名为 `baseline`（含换问法）、`no_examples`、`no_lint`、`mt_teacher`、`mt_free`，以及多轮第一阶段代码的 `mt_teacher_phase1`、`mt_free_phase1`（对照用）；`evals/baselines/<模型>.json` 是回归门禁用的基线。当前结果：单轮 91%（原问法 96%），多轮自由对话追问轮 96%；剩余失败里 JSON 解析（模型输出全角引号）约占一半
 
 ## 已知问题与陷阱
@@ -248,6 +249,12 @@ extract_keywords ─┬─ recall_column    ─┐
 **检索**
 - ES `min_score` 是 BM25 原始得分，2.0 是在教学数仓上实测标定的（正确命中最低约 3.8），数据量或取值分布变化后需要重新标定；共享词造成的噪声命中（“金卡会员”命中“普通会员”、“2025年”命中各活动名）得分也很高，阈值挡不住，只能靠过滤节点；Qdrant 余弦阈值 0.6 没有标定过（本地测试拿不到真实 bge 模型）
 - 提示词必须逐字节确定，评测才可复现、LLM 缓存才能回放：`extract_keywords` 和三个 `recall_*` 节点用 `dict.fromkeys` 保序去重（原来用 `set`，每次启动顺序都可能不同，换进程后缓存只能命中检索词扩展那 3 次调用）。新增节点时不要用 `set` 决定任何进入提示词的顺序
+
+**评测代码（精读发现，尚未修复，复现见 `eval_code_walkthrough.ipynb` 第 11 节）**
+- `compare_with_baseline` 把“本次有必过题失败”当作退化，基线里 `activity_01` 本来就失败，所以与当前基线比较时永远判退化（退出码 1）；它还直接比较两次评测的整体准确率，不检查题集是否一致（只跑原问法时与含换问法的基线比较有约 5 个点的虚假余量）
+- 评测重新执行模型 SQL 时没有固定“当前日期”：SQL 里的 `CURDATE()` / `NOW()` 按跑评测当天计算，同一份缓存在不同日期回放可能得到不同分数（`relative_time_02` / `_04` 换问法把日期固定为 2025-12-31 后是对的）
+- `compare.py`：×100 倍数规则对所有列生效（计数、金额也算）；多重集合比较用贪心匹配，带容差时判定结果可能随行顺序变化
+- 多轮：直接回答只做子串匹配；free 模式下前一轮失败后改为查库，意图会被记为错误
 
 **其他**
 - `filter_table` / `filter_metric` / `recall_*` 用 `JsonOutputParser`，模型输出格式不对会直接抛异常中断整条流程，没有重试或降级
